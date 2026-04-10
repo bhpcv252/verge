@@ -1,5 +1,38 @@
 # Verge Architecture
 
+**Architecture Diagram:** [View on Excalidraw](https://excalidraw.com/#json=y2wsuxsG9_UBdr7tsFJas,TUoBXTDoZ4To1fLhjaY-DA)
+
+---
+
+## Table of Contents
+
+- [Functional Requirements](#functional-requirements)
+- [Non-Functional Requirements](#non-functional-requirements)
+- [Core Entities](#core-entities)
+- [APIs](#apis)
+  - [REST API](#rest-api)
+    - [Repositories](#repositories)
+      - [`POST /repos`](#post-repos)
+      - [`GET /repos`](#get-repos)
+      - [`GET /repos/:repo_id`](#get-reposrepo_id)
+    - [Branches](#branches)
+      - [`POST /repos/:repo_id/branches`](#post-reposrepo_idbranches)
+      - [`GET /repos/:repo_id/branches`](#get-reposrepo_idbranches)
+      - [`PATCH /repos/:repo_id/branches/:name`](#patch-reposrepo_idbranchesname)
+      - [`DELETE /repos/:repo_id/branches/:name`](#delete-reposrepo_idbranchesname)
+    - [Commits](#commits)
+      - [`POST /repos/:repo_id/commits`](#post-reposrepo_idcommits)
+      - [`GET /repos/:repo_id/commits`](#get-reposrepo_idcommits)
+      - [`GET /repos/:repo_id/commits/:commit_id`](#get-reposrepo_idcommitscommit_id)
+      - [`GET /repos/:repo_id/commits/:commit_id/parents`](#get-reposrepo_idcommitscommit_idparents)
+    - [Merges](#merges)
+      - [`POST /repos/:repo_id/merges`](#post-reposrepo_idmerges)
+  - [gRPC API](#grpc-api)
+- [Error Code Reference](#error-code-reference)
+  - [Error Mapping - REST to gRPC](#error-mapping---rest-to-grpc)
+
+---
+
 ## Functional Requirements
 
 - Allow products to create a named repository
@@ -85,7 +118,7 @@
   only the pointer to it
 
 - The commit log must be append-only, no commit
-  may ever be updated or deleted once written (!!May change)
+  may ever be updated or deleted once written
 
 - Branch pointer advancement must use optimistic locking
   no blind overwrites

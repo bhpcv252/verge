@@ -280,7 +280,18 @@ PATCH /repos/repo_doc_abc123/branches/main
    │
    └── COMMIT transaction
 
-4. API Layer
+4. Cache Invalidation (synchronous, if Redis is active)
+   │
+   ├── Attempt to invalidate Redis cache:
+   │     DEL branch:repo_doc_abc123:main
+   │     → Success: cache invalidated immediately (fast path)
+   │     → Failure (network error, Redis down): logged but does not fail the request
+   │         The outbox worker will heal this later (failsafe path)
+   │
+   └── Note: This is write-through cache invalidation. The request succeeds even if
+         Redis is unavailable - PostgreSQL is always the source of truth.
+
+5. API Layer
    │
    └── Returns 200 OK
          {
@@ -289,21 +300,26 @@ PATCH /repos/repo_doc_abc123/branches/main
            "commit_id": "commit_v2"
          }
 
-5. Async - Outbox Workers
+6. Async - Outbox Workers (healing mechanism)
    │
-   └── Redis Invalidation Worker (if active):
+   └── Redis Healing Worker (if active):
          Reads branch.advanced event for branch 'main'
-         DEL branch:repo_doc_abc123:main    ← evicts stale cache entry
-         Marks outbox event processed = true
+         Checks if cache key exists: GET branch:repo_doc_abc123:main
+         → Key exists and matches new_commit_id: already updated, mark processed
+         → Key missing or stale: DEL + log healing action, mark processed
+
+         This worker heals Redis if step 4 failed due to network issues.
+         It is idempotent - running it multiple times is safe.
 ```
 
 **State after this flow:**
 
-| Table           | Change                                |
-| --------------- | ------------------------------------- |
-| `branches`      | `main` now points to `commit_v2`      |
-| `outbox_events` | New branch.advanced event             |
-| Redis (async)   | `branch:repo_doc_abc123:main` evicted |
+| Table           | Change                                                         |
+| --------------- | -------------------------------------------------------------- |
+| `branches`      | `main` now points to `commit_v2`                               |
+| `outbox_events` | New branch.advanced event (for healing if Redis update failed) |
+| Redis (sync)    | `branch:repo_doc_abc123:main` invalidated immediately (DEL)    |
+| Redis (async)   | Healed by outbox worker if synchronous invalidation failed     |
 
 ---
 
@@ -646,7 +662,16 @@ POST /repos/repo_doc_abc123/merges
    │
    └── COMMIT transaction
 
-4. API Layer
+4. Cache Invalidation (synchronous, if Redis is active)
+   │
+   ├── Attempt to invalidate Redis cache for target branch:
+   │     DEL branch:repo_doc_abc123:main
+   │     → Success: cache invalidated immediately
+   │     → Failure: logged but does not fail the merge - outbox worker will heal
+   │
+   └── Note: suggest branch cache is NOT touched - it has not changed
+
+5. API Layer
    │
    └── Returns 201 Created
          {
@@ -659,16 +684,16 @@ POST /repos/repo_doc_abc123/merges
            "timestamp": "2024-04-05T11:00:00Z"
          }
 
-5. Async Workers:
-   ├── Neo4j:
+6. Async Workers (healing mechanism):
+   ├── Neo4j Sync Worker:
    │     MERGE (c:Commit {id: 'commit_v4'})
    │     MERGE (p1:Commit {id: 'commit_v3'})
    │     MERGE (p2:Commit {id: 'commit_v2'})
    │     MERGE (c)-[:PARENT_OF]->(p1)
    │     MERGE (c)-[:PARENT_OF]->(p2)
    │
-   └── Redis:
-         DEL branch:repo_doc_abc123:main
+   └── Redis Healing Worker:
+         Heals branch:repo_doc_abc123:main if step 4 failed
          (suggest branch cache untouched - that branch head has not changed)
 ```
 
