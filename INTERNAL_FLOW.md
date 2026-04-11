@@ -517,7 +517,7 @@ GET /repos/repo_doc_abc123/commits?branch=main&traversal=dag&limit=20
    │
    ├── Routes to active GraphStore backend:
    │
-   │   ── PostgreSQL path (Tier 1 / Tier 2): ──────────────────────────────
+   │   ── PostgreSQL path (when Neo4j is not enabled): ──────────────────────────────
    │   │
    │   │   WITH RECURSIVE history AS (
    │   │     SELECT c.id, c.message, c.author, c.timestamp, c.data_pointer
@@ -535,7 +535,7 @@ GET /repos/repo_doc_abc123/commits?branch=main&traversal=dag&limit=20
    │   │   ORDER BY timestamp DESC
    │   │   LIMIT 21      ← fetch one extra to determine if next page exists
    │   │
-   │   └── ── Neo4j path (Tier 3): ──────────────────────────────────────
+   │   └── ── Neo4j path (when Neo4j is enabled): ──────────────────────────────────────
    │         MATCH (start:Commit {id: 'commit_v2'})-[:PARENT_OF*0..]->(ancestor)
    │         WHERE ancestor.repo_id = 'repo_doc_abc123'
    │         RETURN ancestor ORDER BY ancestor.timestamp DESC LIMIT 21

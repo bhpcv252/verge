@@ -62,17 +62,19 @@ For the full API reference, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ---
 
-## Storage tiers
+## Storage Backends
 
-Verge is designed to run at any scale:
+Verge is designed to scale with your product:
 
-| Tier   | Backends                                   | Use case                                |
-| ------ | ------------------------------------------ | --------------------------------------- |
-| Tier 1 | PostgreSQL only                            | Single instance, small scale            |
-| Tier 2 | PostgreSQL + read replicas + Redis         | Sub-millisecond branch head reads       |
-| Tier 3 | PostgreSQL + read replicas + Redis + Neo4j | Complex ancestry queries at large scale |
+**PostgreSQL** (required) - Always the source of truth. All commits, branches, and metadata are stored here.
 
-PostgreSQL is always the source of truth. Redis and Neo4j are projections that can be rebuilt from PostgreSQL at any time. The API surface is identical regardless of which backends are active, so you can start small and scale up without changing your integration.
+**Redis** (optional) - Enable for sub-millisecond branch head reads. Verge uses Redis as a cache layer for frequently accessed branch pointers.
+
+**Neo4j** (optional) - Enable for complex ancestry queries at large scale. Neo4j provides optimized graph traversal for deep history queries and merge-base operations.
+
+You choose which backends to enable based on your product's scale and infrastructure management capabilities. The API surface is identical regardless of which backends are active - you can start with PostgreSQL only and add Redis or Neo4j later without changing your integration.
+
+All derived stores (Redis, Neo4j) are projections that can be rebuilt from PostgreSQL at any time.
 
 ---
 
@@ -80,7 +82,7 @@ PostgreSQL is always the source of truth. Redis and Neo4j are projections that c
 
 - [Internal system flows](./INTERNAL_FLOW.md) - what happens inside Verge on every request: what gets validated, what gets written, what gets rejected, and what happens asynchronously
 - [Product integration flows](./PRODUCT_INTEGRATION_FLOW.md) - end-to-end walkthroughs for three different product types (document editor, design tool, AI workflow builder)
-- [Architecture and API reference](./ARCHITECTURE.md) - full REST and gRPC API specs, entity model, storage tier details, and error code reference
+- [Architecture and API reference](./ARCHITECTURE.md) - full REST and gRPC API specs, entity model, storage backend details, and error code reference
 
 ---
 

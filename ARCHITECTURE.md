@@ -92,18 +92,18 @@
 - Expose all operations over HTTP/REST and gRPC; and publish .proto
   files for all gRPC operations
 
-- Support pluggable storage backends, PostgreSQL, Neo4j, Redis, Cassandra;
+- Support pluggable storage backends: PostgreSQL (required), Neo4j, Redis;
   selectable per storage interface via configuration
 
-- Allow operators to run with PostgreSQL as the only storage backend (Tier 1)
+- PostgreSQL is always required as the source of truth
 
-- Support read replicas for PostgreSQL at Tier 2
+- Support read replicas for PostgreSQL for horizontal scaling
 
-- Support Neo4j as an alternative GraphStore for ancestry
-  and merge-base queries at Tier 3
+- Support Neo4j as an optional GraphStore for complex ancestry
+  and merge-base queries when enabled by the operator
 
-- Support Redis as an alternative BranchStore for
-  sub-millisecond branch head reads at Tier 2+
+- Support Redis as an optional BranchStore for
+  sub-millisecond branch head reads when enabled by the operator
 
 - Support outbox replay; workers must be idempotent and
   replayable from any point without corrupting derived store state
@@ -127,8 +127,8 @@
   as the commit, a commit that exists without a corresponding outbox
   event is a consistency violation
 
-- PostgreSQL must always be the source of truth derived stores (Neo4j, Redis)
-  are projections and must be rebuildable from PostgreSQL at any time
+- PostgreSQL must always be the source of truth; derived stores (Neo4j, Redis)
+  are optional projections and must be rebuildable from PostgreSQL at any time
 
 - The system must be horizontally scalable at the API layer
   the API service must be stateless
@@ -141,8 +141,8 @@
 - System must support service-to-service authentication only,
   API key or mTLS between the product backend and Verge
 
-- Branch head reads must be the fastest operation in the system,
-  cache hit latency target is sub-millisecond at Tier 2+
+- Branch head reads must be the fastest operation in the system;
+  when Redis is enabled, cache hit latency target is sub-millisecond
 
 - All write operations must return a structured error response with
   a machine-readable error code and a human-readable message
@@ -151,7 +151,7 @@
   returning a 409 with enough information for the caller to retry without data loss
 
 - The system must be operationally runnable at small scale
-  (single PostgreSQL instance) without requiring Redis, Neo4j, or Cassandra
+  with only PostgreSQL, without requiring Redis or Neo4j
 
 - All database writes must use explicit transactions,
   no implicit auto-commit on multi-step operations
