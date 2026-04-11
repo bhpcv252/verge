@@ -3,7 +3,7 @@ FROM golang:1.25-alpine
 RUN apk add --no-cache git bash curl
 
 # Install migrate
-RUN go install github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+RUN go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 
 # Install buf
 RUN go install github.com/bufbuild/buf/cmd/buf@latest
