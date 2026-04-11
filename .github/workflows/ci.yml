@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build containers
+        run: docker compose build
+
+      - name: Start dependencies
+        run: docker compose up -d postgres redis neo4j
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..10}; do
+            docker exec $(docker ps -qf "ancestor=postgres:16") pg_isready && break
+            sleep 2
+          done
+
+      - name: Run migrations
+        run: docker compose run --rm tools migrate \
+          -path=/workspace/migrations \
+          -database "postgres://verge:changeme@postgres:5432/verge?sslmode=disable" up
+
+      - name: Run tests
+        run: docker compose run --rm tools go test ./...
+
+      - name: Run lint
+        run: docker compose run --rm tools golangci-lint run

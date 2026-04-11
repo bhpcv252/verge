@@ -1,0 +1,20 @@
+FROM golang:1.22-alpine
+
+RUN apk add --no-cache git bash curl
+
+# Install migrate
+RUN go install github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+
+# Install buf
+RUN go install github.com/bufbuild/buf/cmd/buf@latest
+
+# Install protoc plugins
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+# Install linter
+RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+ENV PATH="/go/bin:${PATH}"
+
+WORKDIR /workspace

@@ -1,0 +1,12 @@
+pre-commit:
+  commands:
+    checks:
+      run: |
+        docker compose run --rm tools sh -c "
+          echo 'lint' &&
+          golangci-lint run &&
+          echo 'test' &&
+          go test ./... &&
+          echo 'fmt' &&
+          go fmt ./...
+        "
