@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16
@@ -58,7 +56,6 @@ services:
     volumes:
       - .:/workspace
     working_dir: /workspace
-    entrypoint: ["sleep", "infinity"]
 
 volumes:
   pg_data:
