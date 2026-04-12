@@ -79,8 +79,6 @@ verge/
 │   │   └── main.go
 │   ├── worker/
 │   │   └── main.go
-│   └── migrate/
-│       └── main.go
 │
 ├── internal/
 │   ├── api/
