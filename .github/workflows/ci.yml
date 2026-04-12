@@ -40,4 +40,4 @@ jobs:
         run: docker compose run --rm tools go test ./...
 
       - name: Run lint
-        run: docker compose run --rm tools golangci-lint run
+        run: docker compose run --rm -e GOFLAGS=-buildvcs=false tools golangci-lint run

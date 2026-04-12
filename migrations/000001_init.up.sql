@@ -63,7 +63,6 @@ CREATE TABLE branches (
         FOREIGN KEY (repo_id) REFERENCES repos(id)
         ON DELETE CASCADE,
 
-    -- Enforces branch commit belongs to same repo
     CONSTRAINT fk_branches_commit_same_repo
         FOREIGN KEY (commit_id, repo_id)
         REFERENCES commits(id, repo_id)
