@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS branches;
+DROP TABLE IF EXISTS commit_parents;
+DROP TABLE IF EXISTS commits;
+DROP TABLE IF EXISTS repos;
