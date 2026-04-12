@@ -30,9 +30,11 @@ jobs:
           done
 
       - name: Run migrations
-        run: docker compose run --rm tools migrate \
-          -path=/workspace/migrations \
-          -database "postgres://verge:changeme@postgres:5432/verge?sslmode=disable" up
+        run: |
+          docker compose run --rm tools migrate \
+            -path=/workspace/migrations \
+            -database "postgres://verge:changeme@postgres:5432/verge?sslmode=disable" \
+            up
 
       - name: Run tests
         run: docker compose run --rm tools go test ./...
