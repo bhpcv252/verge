@@ -978,7 +978,6 @@ All error responses follow this shape for both REST (JSON body) and gRPC (status
 | ------------------------------ | ---------------------------------------------------------------- |
 | `invalid_request`              | Missing required field, wrong type, invalid enum value           |
 | `repo_not_found`               | The `repo_id` does not exist                                     |
-| `repo_already_exists`          | A repo with this name already exists                             |
 | `branch_not_found`             | The branch does not exist in this repo                           |
 | `branch_already_exists`        | A branch with this name already exists in this repo              |
 | `branch_conflict`              | Branch has advanced past `expected_commit_id` or `expected_head` |
@@ -998,7 +997,6 @@ All error responses follow this shape for both REST (JSON body) and gRPC (status
 | `repo_not_found`               | `404`       | `NOT_FOUND`           |
 | `branch_not_found`             | `404`       | `NOT_FOUND`           |
 | `commit_not_found`             | `404`       | `NOT_FOUND`           |
-| `repo_already_exists`          | `409`       | `ALREADY_EXISTS`      |
 | `branch_already_exists`        | `409`       | `ALREADY_EXISTS`      |
 | `branch_conflict`              | `409`       | `ABORTED`             |
 | `stale_merge_target`           | `409`       | `ABORTED`             |
