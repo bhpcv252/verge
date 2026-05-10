@@ -24,8 +24,8 @@ import (
 	"github.com/bhpcv252/verge/testhelper"
 )
 
-// startServer spins up a real Postgres container, runs all migrations via
-// golang-migrate, wires the full HTTP stack, and returns the /v1 base URL.
+// startServer spins up a real Postgres container, runs all migrations,
+// wires the full HTTP stack, and returns the /v1 base URL.
 func startServer(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()

@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 
+	vergev1 "github.com/bhpcv252/verge/api/proto/verge/v1"
+	grpcv1 "github.com/bhpcv252/verge/internal/api/grpc/v1"
 	restv1 "github.com/bhpcv252/verge/internal/api/rest/v1"
 	"github.com/bhpcv252/verge/internal/config"
 	"github.com/bhpcv252/verge/internal/service"
@@ -78,7 +80,6 @@ func run() error {
 			return nil
 		})
 
-		// fires when the group context is cancelled.
 		g.Go(func() error {
 			<-gCtx.Done()
 			log.Println("HTTP server: shutting down")
@@ -91,10 +92,10 @@ func run() error {
 	// gRPC
 	if cfg.Server.GRPC.Enabled {
 		grpcSrv = grpc.NewServer(
-		// TODO: add interceptors
+		// TODO: add interceptors (auth, logging, recovery)
 		)
 
-		// TODO: register gRPC service implementations
+		vergev1.RegisterRepositoryServiceServer(grpcSrv, grpcv1.NewRepoServer(repoSvc))
 
 		g.Go(func() error {
 			lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.GRPC.Port))
@@ -116,7 +117,7 @@ func run() error {
 		})
 	}
 
-	// listens for SIGINT/SIGTERM and cancels the root context.
+	// listen for SIGINT/SIGTERM and cancels the root context.
 	g.Go(func() error {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
