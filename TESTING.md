@@ -44,10 +44,6 @@
 
 **Location:** co-located with the source file as `*_test.go`
 
-**Runtime:** No database, no network, no filesystem.
-
-**Mocking:** Use `gomock` for interfaces. Every storage interface and service interface should have a generated mock. Mocks live next to the interface definition.
-
 ---
 
 ### Domain Layer (`internal/domain/`)
@@ -67,7 +63,7 @@ Test all validation logic that lives on domain structs.
 
 ### Service Layer (`internal/service/`)
 
-Test business logic that sits above storage. All storage calls are mocked.
+Test business logic that sits above storage. All storage calls are mocked with hand-rolled mocks.
 
 #### RepoService
 
@@ -128,7 +124,7 @@ Test business logic that sits above storage. All storage calls are mocked.
 
 The outbox worker is the async component that reads unprocessed events from `outbox_events` and propagates changes to Neo4j and Redis. Its guarantees are: every event is eventually processed, processing is idempotent (running the same event twice produces the same state), and a worker failure at any point leaves the system in a recoverable state.
 
-Unit tests here mock both the outbox store and the derived stores (Neo4j store, Redis store).
+Unit tests here use hand-rolled mocks for both the outbox store and the derived stores (Neo4j store, Redis store).
 
 #### Event routing
 
@@ -178,19 +174,83 @@ Unit tests here mock both the outbox store and the derived stores (Neo4j store, 
 | Invalid log level                            | Returns parse error                                  |
 | Missing PostgreSQL DSN                       | Returns parse error (required field)                 |
 
+### REST Handlers (`internal/api/rest/v1/`)
+
+The service layer is mocked with a hand-rolled function-field mock. Tests use `httptest.NewRecorder` and call the handler directly via the router. They focus on two things: does the handler correctly parse the request and call the service with the right input, and does it correctly map service errors to the right HTTP status and error code body.
+
+The handler test only verifies that the HTTP response has the right status code and error code field when the service returns that error.
+
+#### RepoHandler
+
+| Scenario                                            | What to assert                                                       |
+| --------------------------------------------------- | -------------------------------------------------------------------- |
+| `POST /repos` - valid body                          | Service called with correct input; 201 returned with serialized repo |
+| `POST /repos` - invalid JSON body                   | 400, `error: "invalid_request"` before service is called             |
+| `POST /repos` - missing `name`                      | 400, `error: "invalid_request"` before service is called             |
+| `POST /repos` - missing `default_branch`            | 400, `error: "invalid_request"` before service is called             |
+| `GET /repos/:id` - service returns repo             | 200 with correct JSON shape                                          |
+| `GET /repos/:id` - service returns `repo_not_found` | 404, `error: "repo_not_found"`                                       |
+| `GET /repos/:id` - service returns unexpected error | 500, `error: "internal_error"`                                       |
+| `GET /repos` - no params                            | 200, passes default limit to service                                 |
+| `GET /repos` - invalid limit param                  | 400, `error: "invalid_request"`                                      |
+| `GET /repos` - limit out of range                   | 400, `error: "invalid_request"`                                      |
+
+#### BranchHandler
+
+| Scenario                                                                            | What to assert                  |
+| ----------------------------------------------------------------------------------- | ------------------------------- |
+| `POST /repos/:id/branches` - valid                                                  | 201, branch fields correct      |
+| `POST /repos/:id/branches` - service returns `repo_not_found`                       | 404                             |
+| `POST /repos/:id/branches` - service returns `commit_not_found`                     | 404                             |
+| `POST /repos/:id/branches` - service returns `branch_already_exists`                | 409                             |
+| `PATCH /repos/:id/branches/:name` - valid                                           | 200                             |
+| `PATCH /repos/:id/branches/:name` - missing `expected_commit_id` in body            | 400                             |
+| `PATCH /repos/:id/branches/:name` - service returns `branch_conflict`               | 409 with `current_head` in body |
+| `DELETE /repos/:id/branches/:name` - valid                                          | 204, empty body                 |
+| `DELETE /repos/:id/branches/:name` - service returns `cannot_delete_default_branch` | 409                             |
+| `DELETE /repos/:id/branches/:name` - service returns `branch_not_found`             | 404                             |
+| `GET /repos/:id/branches` - valid                                                   | 200                             |
+
+#### CommitHandler
+
+| Scenario                                                                  | What to assert                              |
+| ------------------------------------------------------------------------- | ------------------------------------------- |
+| `POST /repos/:id/commits` - valid                                         | 201                                         |
+| `POST /repos/:id/commits` - service returns existing (idempotency hit)    | 200, not 201                                |
+| `POST /repos/:id/commits` - missing required fields                       | 400                                         |
+| `POST /repos/:id/commits` - service returns `invalid_parent`              | 422                                         |
+| `POST /repos/:id/commits` - service returns `branch_conflict`             | 409 with `current_head` in body             |
+| `GET /repos/:id/commits/:commit_id` - valid                               | 200 with full commit including data_pointer |
+| `GET /repos/:id/commits/:commit_id` - service returns `commit_not_found`  | 404                                         |
+| `GET /repos/:id/commits` - valid flat traversal                           | 200                                         |
+| `GET /repos/:id/commits` - dag without branch param                       | 400                                         |
+| `GET /repos/:id/commits` - invalid limit param                            | 400                                         |
+| `GET /repos/:id/commits/:id/parents` - valid                              | 200 with parents array                      |
+| `GET /repos/:id/commits/:id/parents` - service returns `commit_not_found` | 404                                         |
+
+#### MergeHandler
+
+| Scenario                                                        | What to assert                  |
+| --------------------------------------------------------------- | ------------------------------- |
+| `POST /repos/:id/merges` - valid                                | 201                             |
+| `POST /repos/:id/merges` - missing required fields              | 400                             |
+| `POST /repos/:id/merges` - service returns `branch_not_found`   | 404                             |
+| `POST /repos/:id/merges` - service returns `invalid_parent`     | 422                             |
+| `POST /repos/:id/merges` - service returns `stale_merge_target` | 409 with `current_head` in body |
+
 ---
 
 ## Integration Tests
 
 **Location:** co-located with the storage and service packages as `*_test.go`, using the `//go:build integration` build tag.
 
-**Runtime:** Requires Docker. testcontainers-go spins up real PostgreSQL, Redis, and Neo4j containers. Each storage package manages its own container. Run with `go test -tags integration ./...` or `make test-integration`.
+**Runtime:** Requires Docker. testcontainers-go spins up real PostgreSQL, Redis, and Neo4j containers. Migrations are applied via `golang-migrate` using the embedded SQL files in `internal/testhelper/`. Each storage package manages its own container. Run with `go test -tags integration ./...` or `make test-integration`.
 
 ---
 
 ### PostgreSQL Storage (`internal/storage/postgres/`)
 
-Each test gets a clean schema. Tests share a container within a package but each test isolates its data by using unique repo/commit IDs.
+Each test gets a clean schema via a fresh container. Tests share a container within a package but each test isolates its data by using unique repo/commit IDs.
 
 #### RepoStore
 
@@ -453,13 +513,5 @@ These are minimums, not ceilings.
 | `internal/storage/redis/`    | Every store method, cache hit/miss/unavailable paths                               |
 | `internal/storage/neo4j/`    | Every store method, idempotency on replay, pagination                              |
 | `internal/api/rest/v1/`      | All handlers, focus on error mapping                                               |
-| `internal/api/grpc/v1/`      | Same as REST                                                                       |
 | `internal/outbox/`           | All event types, all handler outcomes, idempotency on double-processing            |
 | `test/e2e/`                  | Not measured by line coverage, measured by flow coverage (see Full Flow E2E above) |
-
-Run coverage with:
-
-```bash
-make test-cover        # unit only
-make test-cover-all    # unit + integration
-```
