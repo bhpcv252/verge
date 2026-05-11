@@ -1,0 +1,25 @@
+name: Integration & E2E
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  integration-and-e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Verify Docker
+        run: docker version
+
+      - name: Run integration and e2e tests
+        run: go test -v -tags=integration,e2e ./...
