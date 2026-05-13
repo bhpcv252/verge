@@ -21,5 +21,20 @@ jobs:
       - name: Verify Docker
         run: docker version
 
-      - name: Run integration and e2e tests
-        run: go test -v -tags=integration,e2e ./...
+      - name: Run integration and e2e tests with coverage
+        run: |
+          go test -v \
+            -tags=integration,e2e \
+            -covermode=atomic \
+            -coverprofile=coverage-integration.txt \
+            ./...
+
+      - name: Upload integration coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage-integration.txt
+          flags: integration
+          name: integration-e2e
+          fail_ci_if_error: true
+          verbose: true

@@ -33,8 +33,21 @@ jobs:
       - name: Run lint
         run: docker compose run --rm -e GOFLAGS=-buildvcs=false tools golangci-lint run
 
-      - name: Run tests
-        run: go test ./...
+      - name: Run tests with coverage
+        run: |
+          go test ./... \
+            -covermode=atomic \
+            -coverprofile=coverage-unit.txt
+
+      - name: Upload unit coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage-unit.txt
+          flags: unit
+          name: unit-tests
+          fail_ci_if_error: true
+          verbose: true
 
       - name: Verify server build
         run: go build ./cmd/server
