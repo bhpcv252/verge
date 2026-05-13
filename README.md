@@ -2,6 +2,8 @@
 
 > The version control layer for your product
 
+[![codecov](https://codecov.io/github/bhpcv252/verge/graph/badge.svg?token=QCPB1JQS9K)](https://codecov.io/github/bhpcv252/verge)
+
 Verge is a backend service that gives any product versioning, branching, and history without storing or touching data.
 
 You keep your data in your own storage. Verge keeps track of the graph: what changed, when, who made it, what came before it, and how branches relate to each other. It's the commit graph engine you'd otherwise have to build yourself.
