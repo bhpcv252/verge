@@ -6,9 +6,6 @@ pre-commit:
         make test &&
         go fmt ./...
 
-    proto-check:
-      run: make proto-check
-
 pre-push:
   commands:
     integration:

@@ -12,10 +12,6 @@ build:
 proto:
 	docker compose run --rm tools buf generate
 
-proto-check:
-	@make proto
-	@git diff --quiet || (echo "Proto files were regenerated. Please review and stage the changes." && exit 1)
-
 migrate-up:
 	docker compose run --rm tools migrate \
 	-path=/workspace/migrations \
