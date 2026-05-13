@@ -1,4 +1,4 @@
-.PHONY: up down build
+.PHONY: up down build proto proto-check migrate-up migrate-down lint test test-all
 
 up:
 	docker compose up --build
@@ -26,4 +26,7 @@ lint:
 	docker compose run --rm tools golangci-lint run
 
 test:
-	docker compose run --rm tools go test ./...
+	go test ./...
+
+test-all:
+	go test -tags integration,e2e ./...

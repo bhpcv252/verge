@@ -41,7 +41,7 @@ Restore, branching, merging, and history queries all follow the same pattern. Yo
 
 ## API
 
-Verge exposes both a REST API and a gRPC API (`.proto` files included). No SDK is required - the raw HTTP interface is enough to fully integrate.
+Verge exposes both a REST API and a gRPC API (`.proto` files included). No SDK is required, the raw HTTP interface is enough to fully integrate.
 
 Core endpoints:
 

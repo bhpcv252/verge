@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package verge.v1;
+
+option go_package = "github.com/bhpcv252/verge/api/proto/verge/v1;vergev1";
+
+service RepositoryService {
+  rpc CreateRepo (CreateRepoRequest)  returns (Repository);
+  rpc GetRepo    (GetRepoRequest)     returns (Repository);
+  rpc ListRepos  (ListReposRequest)   returns (ListReposResponse);
+}
+
+message Repository {
+  string id             = 1;
+  string name           = 2;
+  string default_branch = 3;
+  string created_at     = 4; // ISO 8601
+}
+
+message CreateRepoRequest {
+  string name           = 1;
+  string default_branch = 2;
+}
+
+message GetRepoRequest {
+  string repo_id = 1;
+}
+
+message ListReposRequest {
+  int32  limit  = 1;
+  string cursor = 2;
+}
+
+message ListReposResponse {
+  repeated Repository repos       = 1;
+  string              next_cursor = 2; // empty string when no more pages
+}
