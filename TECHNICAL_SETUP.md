@@ -21,7 +21,7 @@
 
 ### Core
 
-- **Language**: Go 1.22+
+- **Language**: Go 1.25+
 - **HTTP Framework**: chi (lightweight, idiomatic, stdlib-compatible)
 - **gRPC**: official Go gRPC implementation
 - **Database Driver**: pgx (PostgreSQL)
@@ -277,7 +277,7 @@ make run
 ### Docker
 
 ```dockerfile
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 RUN go build -o verge-server
 
 FROM alpine
