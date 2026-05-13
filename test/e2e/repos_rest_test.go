@@ -3,113 +3,22 @@
 package e2e
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"testing"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	pgmodule "github.com/testcontainers/testcontainers-go/modules/postgres"
 
-	restv1 "github.com/bhpcv252/verge/internal/api/rest/v1"
-	"github.com/bhpcv252/verge/internal/service"
-	pgstore "github.com/bhpcv252/verge/internal/storage/postgres"
 	"github.com/bhpcv252/verge/testhelper"
 )
 
-// startServer spins up a real Postgres container, runs all migrations,
-// wires the full HTTP stack, and returns the /v1 base URL.
 func startServer(t *testing.T) string {
 	t.Helper()
-	ctx := context.Background()
-
-	ctr, err := pgmodule.Run(ctx,
-		"postgres:16",
-		pgmodule.WithDatabase("verge"),
-		pgmodule.WithUsername("verge"),
-		pgmodule.WithPassword("changeme"),
-		pgmodule.BasicWaitStrategies(),
-	)
-	require.NoError(t, err, "failed to start postgres container")
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
-
-	connStr, err := ctr.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-
-	testhelper.RunMigrations(t, connStr)
-
-	pool, err := pgstore.NewPool(ctx, connStr)
-	require.NoError(t, err, "failed to connect to postgres")
-	t.Cleanup(pool.Close)
-
-	repoStore := pgstore.NewRepoStore(pool)
-	repoSvc := service.NewRepoService(repoStore)
-	repoHandler := restv1.NewRepoHandler(repoSvc)
-	router := restv1.NewRouter(repoHandler)
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err, "failed to get free port")
-
-	srv := &http.Server{
-		Handler:      router,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
-	}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-
-	return fmt.Sprintf("http://%s/v1", ln.Addr().String())
+	pool, cleanup := testhelper.SetupPostgres(t)
+	t.Cleanup(cleanup)
+	return startE2EServer(t, pool)
 }
-
-// types
-
-type repoResponse struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	DefaultBranch string    `json:"default_branch"`
-	CreatedAt     time.Time `json:"created_at"`
-}
-
-type listReposResponse struct {
-	Repos      []repoResponse `json:"repos"`
-	NextCursor *string        `json:"next_cursor"`
-}
-
-type errResponse struct {
-	Error   string `json:"error"`
-	Message string `json:"message"`
-}
-
-// helpers
-
-func doPost(t *testing.T, url string, body any) *http.Response {
-	t.Helper()
-	b, _ := json.Marshal(body)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(b))
-	require.NoError(t, err, "POST %s failed", url)
-	return resp
-}
-
-func doGet(t *testing.T, url string) *http.Response {
-	t.Helper()
-	resp, err := http.Get(url)
-	require.NoError(t, err, "GET %s failed", url)
-	return resp
-}
-
-func decodeJSON(t *testing.T, r io.Reader, v any) {
-	t.Helper()
-	require.NoError(t, json.NewDecoder(r).Decode(v), "failed to decode JSON response")
-}
-
-func uniqueRepoName() string { return "e2e-" + uuid.New().String() }
 
 // POST /v1/repos
 
