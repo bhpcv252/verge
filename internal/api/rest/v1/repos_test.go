@@ -3,19 +3,18 @@ package v1
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bhpcv252/verge/internal/domain"
 	"github.com/bhpcv252/verge/internal/service"
+	"github.com/bhpcv252/verge/testhelper"
 )
 
 // mock
@@ -47,48 +46,12 @@ func (m *mockRepoService) ListRepos(
 // helpers
 
 func newTestRouter(svc RepoService) http.Handler {
-	return NewRouter(NewRepoHandler(svc))
-}
-
-func fixedRepo() *domain.Repo {
-	return &domain.Repo{
-		ID:            "repo_abc123",
-		Name:          "my-doc",
-		DefaultBranch: "main",
-		CreatedAt:     time.Date(2024, 4, 5, 10, 0, 0, 0, time.UTC),
-	}
-}
-
-func postJSON(t *testing.T, router http.Handler, path string, body any) *httptest.ResponseRecorder {
-	t.Helper()
-	b, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	return w
-}
-
-func getPath(t *testing.T, router http.Handler, path string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	return w
-}
-
-func decodeBody(t *testing.T, w *httptest.ResponseRecorder, v any) {
-	t.Helper()
-	err := json.NewDecoder(w.Body).Decode(v)
-	require.NoError(t, err, "failed to decode response body")
-}
-
-func assertErrorCode(t *testing.T, w *httptest.ResponseRecorder, wantStatus int, wantCode string) {
-	t.Helper()
-	assert.Equal(t, wantStatus, w.Code)
-	var got errResponse
-	decodeBody(t, w, &got)
-	assert.Equal(t, wantCode, got.Error)
+	return NewRouter(
+		NewRepoHandler(svc),
+		nil, // branchHandler
+		nil, // commitHandler
+		nil, // mergeHandler
+	)
 }
 
 // POST /v1/repos
@@ -99,11 +62,11 @@ func TestCreateRepo_ValidBody_Returns201AndCallsServiceWithCorrectInput(t *testi
 	svc := &mockRepoService{
 		createFn: func(_ context.Context, in service.CreateRepoInput) (*domain.Repo, error) {
 			capturedInput = in
-			return fixedRepo(), nil
+			return testhelper.FixedRepo(), nil
 		},
 	}
 
-	w := postJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
+	w := testhelper.PostJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
 		"name":           "my-doc",
 		"default_branch": "main",
 	})
@@ -111,7 +74,7 @@ func TestCreateRepo_ValidBody_Returns201AndCallsServiceWithCorrectInput(t *testi
 	require.Equal(t, http.StatusCreated, w.Code)
 
 	var got repoResponse
-	decodeBody(t, w, &got)
+	testhelper.DecodeBody(t, w, &got)
 	assert.Equal(t, "repo_abc123", got.ID)
 	assert.Equal(t, "main", got.DefaultBranch)
 	assert.False(t, got.CreatedAt.IsZero())
@@ -133,7 +96,7 @@ func TestCreateRepo_InvalidJSON_Returns400BeforeServiceIsCalled(t *testing.T) {
 	w := httptest.NewRecorder()
 	newTestRouter(svc).ServeHTTP(w, req)
 
-	assertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
+	testhelper.AssertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
 	assert.False(t, called, "service should not have been called on invalid JSON")
 }
 
@@ -146,11 +109,11 @@ func TestCreateRepo_MissingName_Returns400BeforeServiceIsCalled(t *testing.T) {
 		},
 	}
 
-	w := postJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
+	w := testhelper.PostJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
 		"default_branch": "main",
 	})
 
-	assertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
+	testhelper.AssertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
 	assert.False(t, called, "service should not have been called when name is missing")
 }
 
@@ -163,11 +126,11 @@ func TestCreateRepo_MissingDefaultBranch_Returns400BeforeServiceIsCalled(t *test
 		},
 	}
 
-	w := postJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
+	w := testhelper.PostJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
 		"name": "my-doc",
 	})
 
-	assertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
+	testhelper.AssertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
 	assert.False(t, called, "service should not have been called when default_branch is missing")
 }
 
@@ -180,12 +143,12 @@ func TestCreateRepo_WhitespaceOnlyName_Returns400BeforeServiceIsCalled(t *testin
 		},
 	}
 
-	w := postJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
+	w := testhelper.PostJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
 		"name":           "   ",
 		"default_branch": "main",
 	})
 
-	assertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
+	testhelper.AssertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
 	assert.False(t, called)
 }
 
@@ -198,12 +161,12 @@ func TestCreateRepo_WhitespaceOnlyDefaultBranch_Returns400BeforeServiceIsCalled(
 		},
 	}
 
-	w := postJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
+	w := testhelper.PostJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
 		"name":           "my-doc",
 		"default_branch": "   ",
 	})
 
-	assertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
+	testhelper.AssertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
 	assert.False(t, called)
 }
 
@@ -214,22 +177,22 @@ func TestCreateRepo_ServiceReturnsUnexpectedError_Returns500(t *testing.T) {
 		},
 	}
 
-	w := postJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
+	w := testhelper.PostJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
 		"name":           "my-doc",
 		"default_branch": "main",
 	})
 
-	assertErrorCode(t, w, http.StatusInternalServerError, "internal_error")
+	testhelper.AssertErrorCode(t, w, http.StatusInternalServerError, "internal_error")
 }
 
 func TestCreateRepo_ValidBody_ResponseContentTypeIsJSON(t *testing.T) {
 	svc := &mockRepoService{
 		createFn: func(_ context.Context, _ service.CreateRepoInput) (*domain.Repo, error) {
-			return fixedRepo(), nil
+			return testhelper.FixedRepo(), nil
 		},
 	}
 
-	w := postJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
+	w := testhelper.PostJSON(t, newTestRouter(svc), "/v1/repos", map[string]string{
 		"name":           "my-doc",
 		"default_branch": "main",
 	})
@@ -240,7 +203,7 @@ func TestCreateRepo_ValidBody_ResponseContentTypeIsJSON(t *testing.T) {
 // GET /v1/repos/:id
 
 func TestGetRepo_ServiceReturnsRepo_Returns200WithCorrectShape(t *testing.T) {
-	repo := fixedRepo()
+	repo := testhelper.FixedRepo()
 	svc := &mockRepoService{
 		getFn: func(_ context.Context, id string) (*domain.Repo, error) {
 			assert.Equal(t, repo.ID, id)
@@ -248,11 +211,11 @@ func TestGetRepo_ServiceReturnsRepo_Returns200WithCorrectShape(t *testing.T) {
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos/"+repo.ID)
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos/"+repo.ID)
 
 	require.Equal(t, http.StatusOK, w.Code)
 	var got repoResponse
-	decodeBody(t, w, &got)
+	testhelper.DecodeBody(t, w, &got)
 	assert.Equal(t, repo.ID, got.ID)
 	assert.Equal(t, repo.Name, got.Name)
 	assert.Equal(t, repo.DefaultBranch, got.DefaultBranch)
@@ -262,11 +225,11 @@ func TestGetRepo_RepoIDFromPathPassedToService(t *testing.T) {
 	svc := &mockRepoService{
 		getFn: func(_ context.Context, id string) (*domain.Repo, error) {
 			assert.Equal(t, "repo_xyz999", id)
-			return fixedRepo(), nil
+			return testhelper.FixedRepo(), nil
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos/repo_xyz999")
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos/repo_xyz999")
 	require.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -277,8 +240,8 @@ func TestGetRepo_ServiceReturnsRepoNotFound_Returns404WithRepoNotFoundCode(t *te
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos/repo_missing")
-	assertErrorCode(t, w, http.StatusNotFound, "repo_not_found")
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos/repo_missing")
+	testhelper.AssertErrorCode(t, w, http.StatusNotFound, "repo_not_found")
 }
 
 func TestGetRepo_ServiceReturnsUnexpectedError_Returns500(t *testing.T) {
@@ -288,8 +251,8 @@ func TestGetRepo_ServiceReturnsUnexpectedError_Returns500(t *testing.T) {
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos/repo_abc")
-	assertErrorCode(t, w, http.StatusInternalServerError, "internal_error")
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos/repo_abc")
+	testhelper.AssertErrorCode(t, w, http.StatusInternalServerError, "internal_error")
 }
 
 // GET /v1/repos
@@ -299,11 +262,11 @@ func TestListRepos_NoParams_Returns200AndPassesDefaultLimitToService(t *testing.
 		listFn: func(_ context.Context, in service.ListReposInput) (*service.ListReposResult, error) {
 			assert.Equal(t, 20, in.Limit)
 			assert.Equal(t, "", in.Cursor)
-			return &service.ListReposResult{Repos: []*domain.Repo{fixedRepo()}}, nil
+			return &service.ListReposResult{Repos: []*domain.Repo{testhelper.FixedRepo()}}, nil
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos")
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos")
 	require.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -315,7 +278,7 @@ func TestListRepos_ExplicitValidLimit_PassedToService(t *testing.T) {
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), fmt.Sprintf("/v1/repos?limit=%d", 50))
+	w := testhelper.GetPath(t, newTestRouter(svc), fmt.Sprintf("/v1/repos?limit=%d", 50))
 	require.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -328,8 +291,8 @@ func TestListRepos_InvalidLimitParam_Returns400BeforeServiceIsCalled(t *testing.
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos?limit=abc")
-	assertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos?limit=abc")
+	testhelper.AssertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
 	assert.False(t, called, "service should not have been called on invalid limit")
 }
 
@@ -348,8 +311,8 @@ func TestListRepos_LimitOutOfRange_Returns400(t *testing.T) {
 					return nil, nil
 				},
 			}
-			w := getPath(t, newTestRouter(svc), "/v1/repos?limit="+tc.limit)
-			assertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
+			w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos?limit="+tc.limit)
+			testhelper.AssertErrorCode(t, w, http.StatusBadRequest, "invalid_request")
 			assert.False(t, called)
 		})
 	}
@@ -363,7 +326,7 @@ func TestListRepos_CursorParam_PassedToService(t *testing.T) {
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos?cursor=some-cursor")
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos?cursor=some-cursor")
 	require.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -371,17 +334,17 @@ func TestListRepos_WithNextCursor_IncludedInResponse(t *testing.T) {
 	svc := &mockRepoService{
 		listFn: func(_ context.Context, _ service.ListReposInput) (*service.ListReposResult, error) {
 			return &service.ListReposResult{
-				Repos:      []*domain.Repo{fixedRepo()},
+				Repos:      []*domain.Repo{testhelper.FixedRepo()},
 				NextCursor: "next-page-abc",
 			}, nil
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos")
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos")
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var got listReposResponse
-	decodeBody(t, w, &got)
+	testhelper.DecodeBody(t, w, &got)
 	require.NotNil(t, got.NextCursor)
 	assert.Equal(t, "next-page-abc", *got.NextCursor)
 }
@@ -390,17 +353,17 @@ func TestListRepos_NoNextCursor_NullInResponse(t *testing.T) {
 	svc := &mockRepoService{
 		listFn: func(_ context.Context, _ service.ListReposInput) (*service.ListReposResult, error) {
 			return &service.ListReposResult{
-				Repos:      []*domain.Repo{fixedRepo()},
+				Repos:      []*domain.Repo{testhelper.FixedRepo()},
 				NextCursor: "",
 			}, nil
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos")
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos")
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var got listReposResponse
-	decodeBody(t, w, &got)
+	testhelper.DecodeBody(t, w, &got)
 	assert.Nil(t, got.NextCursor)
 }
 
@@ -411,6 +374,6 @@ func TestListRepos_ServiceReturnsUnexpectedError_Returns500(t *testing.T) {
 		},
 	}
 
-	w := getPath(t, newTestRouter(svc), "/v1/repos")
-	assertErrorCode(t, w, http.StatusInternalServerError, "internal_error")
+	w := testhelper.GetPath(t, newTestRouter(svc), "/v1/repos")
+	testhelper.AssertErrorCode(t, w, http.StatusInternalServerError, "internal_error")
 }

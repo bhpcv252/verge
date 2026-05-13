@@ -48,9 +48,14 @@ func run() error {
 
 	// Stores
 	repoStore := postgres.NewRepoStore(pool)
+	branchStore := postgres.NewBranchStore(pool)
+	commitStore := postgres.NewCommitStore(pool)
 
 	// Services
 	repoSvc := service.NewRepoService(repoStore)
+	commitSvc := service.NewCommitService(commitStore, repoStore)
+	branchSvc := service.NewBranchService(branchStore, repoStore, commitStore)
+	mergeSvc := service.NewMergeService(commitStore, repoStore, commitStore, branchStore)
 
 	// Servers
 	g, gCtx := errgroup.WithContext(ctx)
@@ -61,7 +66,10 @@ func run() error {
 	// HTTP
 	if cfg.Server.HTTP.Enabled {
 		repoHandler := restv1.NewRepoHandler(repoSvc)
-		router := restv1.NewRouter(repoHandler)
+		branchHandler := restv1.NewBranchHandler(branchSvc)
+		commitHandler := restv1.NewCommitHandler(commitSvc)
+		mergeHandler := restv1.NewMergeHandler(mergeSvc)
+		router := restv1.NewRouter(repoHandler, branchHandler, commitHandler, mergeHandler)
 
 		httpSrv = &http.Server{
 			Addr:         fmt.Sprintf(":%d", cfg.Server.HTTP.Port),

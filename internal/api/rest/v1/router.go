@@ -7,7 +7,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-func NewRouter(repoHandler *RepoHandler) http.Handler {
+func NewRouter(
+	repoHandler *RepoHandler,
+	branchHandler *BranchHandler,
+	commitHandler *CommitHandler,
+	mergeHandler *MergeHandler,
+) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware
@@ -23,6 +28,9 @@ func NewRouter(repoHandler *RepoHandler) http.Handler {
 	// v1 API
 	r.Route("/v1", func(r chi.Router) {
 		repoHandler.Mount(r)
+		branchHandler.Mount(r)
+		commitHandler.Mount(r)
+		mergeHandler.Mount(r)
 	})
 
 	return r

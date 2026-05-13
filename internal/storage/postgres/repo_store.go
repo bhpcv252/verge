@@ -24,7 +24,7 @@ func NewRepoStore(db *pgxpool.Pool) *RepoStore {
 
 type ListReposPage struct {
 	Repos      []*domain.Repo
-	NextCursor string // empty string = no more pages
+	NextCursor string // empty string - no more pages
 }
 
 func (s *RepoStore) Create(ctx context.Context, repo *domain.Repo) error {
@@ -58,10 +58,10 @@ func (s *RepoStore) GetByID(ctx context.Context, id string) (*domain.Repo, error
 	return repo, nil
 }
 
-// Pass an empty cursor for the first page;
-// use ListReposPage.NextCursor for subsequent pages.
+// pass an empty cursor for the first page;
+// use ListReposPage.NextCursor for subsequent pages
 func (s *RepoStore) List(ctx context.Context, limit int, cursor string) (*ListReposPage, error) {
-	fetchLimit := limit + 1 // Fetch one extra to check if there is another page.
+	fetchLimit := limit + 1 // fetch one extra to check if there is another page
 
 	var (
 		rows pgx.Rows
