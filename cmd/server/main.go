@@ -13,9 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/grpc"
 
-	vergev1 "github.com/bhpcv252/verge/api/proto/verge/v1"
 	grpcv1 "github.com/bhpcv252/verge/internal/api/grpc/v1"
 	restv1 "github.com/bhpcv252/verge/internal/api/rest/v1"
 	"github.com/bhpcv252/verge/internal/config"
@@ -57,21 +55,17 @@ func run() error {
 	branchSvc := service.NewBranchService(branchStore, repoStore, commitStore)
 	mergeSvc := service.NewMergeService(commitStore, repoStore, commitStore, branchStore)
 
-	// Servers
 	g, gCtx := errgroup.WithContext(ctx)
-
-	var httpSrv *http.Server
-	var grpcSrv *grpc.Server
 
 	// HTTP
 	if cfg.Server.HTTP.Enabled {
-		repoHandler := restv1.NewRepoHandler(repoSvc)
-		branchHandler := restv1.NewBranchHandler(branchSvc)
-		commitHandler := restv1.NewCommitHandler(commitSvc)
-		mergeHandler := restv1.NewMergeHandler(mergeSvc)
-		router := restv1.NewRouter(repoHandler, branchHandler, commitHandler, mergeHandler)
-
-		httpSrv = &http.Server{
+		router := restv1.NewRouter(
+			restv1.NewRepoHandler(repoSvc),
+			restv1.NewBranchHandler(branchSvc),
+			restv1.NewCommitHandler(commitSvc),
+			restv1.NewMergeHandler(mergeSvc),
+		)
+		httpSrv := &http.Server{
 			Addr:         fmt.Sprintf(":%d", cfg.Server.HTTP.Port),
 			Handler:      router,
 			ReadTimeout:  15 * time.Second,
@@ -87,7 +81,6 @@ func run() error {
 			}
 			return nil
 		})
-
 		g.Go(func() error {
 			<-gCtx.Done()
 			log.Println("HTTP server: shutting down")
@@ -99,11 +92,12 @@ func run() error {
 
 	// gRPC
 	if cfg.Server.GRPC.Enabled {
-		grpcSrv = grpc.NewServer(
-		// TODO: add interceptors (auth, logging, recovery)
+		grpcSrv := grpcv1.NewServer(
+			grpcv1.NewRepoServer(repoSvc),
+			grpcv1.NewBranchServer(branchSvc),
+			grpcv1.NewCommitServer(commitSvc),
+			grpcv1.NewMergeServer(mergeSvc),
 		)
-
-		vergev1.RegisterRepositoryServiceServer(grpcSrv, grpcv1.NewRepoServer(repoSvc))
 
 		g.Go(func() error {
 			lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.GRPC.Port))
@@ -116,7 +110,6 @@ func run() error {
 			}
 			return nil
 		})
-
 		g.Go(func() error {
 			<-gCtx.Done()
 			log.Println("gRPC server: shutting down")
@@ -125,7 +118,7 @@ func run() error {
 		})
 	}
 
-	// listen for SIGINT/SIGTERM and cancels the root context.
+	// shutdown signal
 	g.Go(func() error {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

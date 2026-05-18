@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -146,16 +147,13 @@ func (s *BranchService) AdvanceBranch(
 	ctx context.Context,
 	in AdvanceBranchInput,
 ) (*domain.Branch, error) {
+	if in.ExpectedCommitID == "" {
+		return nil, &ValidationError{Msg: "expected_commit_id is required"}
+	}
+
 	_, err := s.repoStore.GetByID(ctx, in.RepoID)
 	if err != nil {
 		return nil, fmt.Errorf("service: advance branch: %w", err)
-	}
-
-	// validate expected_commit_id is provided
-	if in.ExpectedCommitID == "" {
-		return nil, fmt.Errorf(
-			"service: advance branch: expected_commit_id is required for optimistic locking",
-		)
 	}
 
 	// validate commit_id exists in this repo
@@ -166,6 +164,15 @@ func (s *BranchService) AdvanceBranch(
 
 	branch, err := s.store.Advance(ctx, in.RepoID, in.Name, in.CommitID, in.ExpectedCommitID)
 	if err != nil {
+		// translate postgres-level conflict into a service-level
+		var pgConflict *postgres.BranchConflictError
+		if errors.As(err, &pgConflict) {
+			return nil, &BranchConflictError{
+				BranchName:   in.Name,
+				CurrentHead:  pgConflict.CurrentHead,
+				ExpectedHead: in.ExpectedCommitID,
+			}
+		}
 		return nil, fmt.Errorf("service: advance branch: %w", err)
 	}
 

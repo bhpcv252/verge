@@ -1,39 +1,23 @@
 package v1
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
 	"github.com/bhpcv252/verge/internal/service"
 )
 
-type CommitService interface {
-	CreateCommit(
-		ctx context.Context,
-		in service.CreateCommitInput,
-	) (*service.CreateCommitResult, error)
-	GetCommit(ctx context.Context, repoID, commitID string) (*domain.Commit, error)
-	ListCommits(
-		ctx context.Context,
-		in service.ListCommitsInput,
-	) (*service.ListCommitsResult, error)
-	GetParents(ctx context.Context, repoID, commitID string) ([]*domain.Commit, error)
-}
-
 type CommitHandler struct {
-	svc CommitService
+	svc core.CommitService
 }
 
-func NewCommitHandler(svc CommitService) *CommitHandler {
+func NewCommitHandler(svc core.CommitService) *CommitHandler {
 	return &CommitHandler{svc: svc}
 }
 
@@ -44,33 +28,47 @@ func (h *CommitHandler) Mount(r chi.Router) {
 	r.Get("/repos/{repoID}/commits/{commitID}/parents", h.GetParents)
 }
 
+type dataPointerRequest struct {
+	Type     string          `json:"type"`
+	Location string          `json:"location"`
+	Hash     string          `json:"hash,omitempty"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+}
+
 type createCommitRequest struct {
 	ParentIDs      []string           `json:"parent_ids"`
-	ExpectedHead   string             `json:"expected_head,omitempty"`
-	DataPointer    domain.DataPointer `json:"data_pointer"`
+	ExpectedHead   string             `json:"expected_head"`
+	DataPointer    dataPointerRequest `json:"data_pointer"`
 	Message        string             `json:"message"`
 	Author         string             `json:"author"`
-	IdempotencyKey string             `json:"idempotency_key,omitempty"`
+	IdempotencyKey string             `json:"idempotency_key"`
 }
 
 type commitResponse struct {
-	ID          string             `json:"id"`
-	RepoID      string             `json:"repo_id"`
-	ParentIDs   []string           `json:"parent_ids"`
-	DataPointer domain.DataPointer `json:"data_pointer"`
-	Message     string             `json:"message"`
-	Author      string             `json:"author"`
-	Timestamp   time.Time          `json:"timestamp"`
+	ID          string              `json:"id"`
+	RepoID      string              `json:"repo_id"`
+	ParentIDs   []string            `json:"parent_ids"`
+	DataPointer dataPointerResponse `json:"data_pointer"`
+	Message     string              `json:"message"`
+	Author      string              `json:"author"`
+	Timestamp   string              `json:"timestamp"`
+}
+
+type dataPointerResponse struct {
+	Type     string          `json:"type"`
+	Location string          `json:"location"`
+	Hash     string          `json:"hash,omitempty"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
 }
 
 type createCommitResponse struct {
 	commitResponse
-	Existing bool `json:"existing,omitempty"` // true if idempotency_key matched
+	Existing bool `json:"existing,omitempty"`
 }
 
 type listCommitsResponse struct {
 	Commits    []commitResponse `json:"commits"`
-	NextCursor *string          `json:"next_cursor"` // null when there is no next page
+	NextCursor string           `json:"next_cursor,omitempty"`
 }
 
 type getParentsResponse struct {
@@ -78,24 +76,12 @@ type getParentsResponse struct {
 	Parents  []commitResponse `json:"parents"`
 }
 
-func toCommitResponse(c *domain.Commit) commitResponse {
-	return commitResponse{
-		ID:          c.ID,
-		RepoID:      c.RepoID,
-		ParentIDs:   c.ParentIDs,
-		DataPointer: c.DataPointer,
-		Message:     c.Message,
-		Author:      c.Author,
-		Timestamp:   c.Timestamp,
-	}
-}
-
 func (h *CommitHandler) CreateCommit(w http.ResponseWriter, r *http.Request) {
 	repoID := chi.URLParam(r, "repoID")
 
 	var req createCommitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		badRequest(w, "Request body must be valid JSON.")
+		badRequest(w, "request body must be valid JSON")
 		return
 	}
 
@@ -112,59 +98,54 @@ func (h *CommitHandler) CreateCommit(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "'author' is required and must not be empty.")
 		return
 	}
-	// DataPointer presence check
 	if req.DataPointer.Type == "" || req.DataPointer.Location == "" {
 		badRequest(w, "'data_pointer' with 'type' and 'location' is required.")
 		return
 	}
 
-	// detailed DataPointer validation happens in service layer
 	result, err := h.svc.CreateCommit(r.Context(), service.CreateCommitInput{
-		RepoID:         repoID,
-		ParentIDs:      req.ParentIDs,
-		ExpectedHead:   req.ExpectedHead,
-		DataPointer:    req.DataPointer,
+		RepoID:       repoID,
+		ParentIDs:    req.ParentIDs,
+		ExpectedHead: req.ExpectedHead,
+		DataPointer: domain.DataPointer{
+			Type:     req.DataPointer.Type,
+			Location: req.DataPointer.Location,
+			Hash:     req.DataPointer.Hash,
+			Metadata: req.DataPointer.Metadata,
+		},
 		Message:        req.Message,
 		Author:         req.Author,
 		IdempotencyKey: req.IdempotencyKey,
 	})
 	if err != nil {
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		if errors.Is(err, domain.ErrInvalidParent) {
-			unprocessableEntity(w, "invalid_parent",
-				"One or more parent_ids do not exist in this repository.")
-			return
-		}
-		// check for validation errors from DataPointer or parent_ids count
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "data_pointer") || strings.Contains(errMsg, "parent_ids") ||
-			strings.Contains(errMsg, "merge commits") {
-			badRequest(w, err.Error())
-			return
-		}
-		internalError(w)
+		writeAppError(w, core.MapDomainError(err))
 		return
 	}
 
-	// if existing commit was returned due to idempotency, return 200
 	if result.Existing {
-		resp := createCommitResponse{
+		writeJSON(w, http.StatusOK, createCommitResponse{
 			commitResponse: toCommitResponse(result.Commit),
 			Existing:       true,
-		}
-		writeJSON(w, http.StatusOK, resp)
+		})
 		return
 	}
 
-	// new commit created, return 201
-	resp := createCommitResponse{
+	writeJSON(w, http.StatusCreated, createCommitResponse{
 		commitResponse: toCommitResponse(result.Commit),
+	})
+}
+
+func (h *CommitHandler) GetCommit(w http.ResponseWriter, r *http.Request) {
+	repoID := chi.URLParam(r, "repoID")
+	commitID := chi.URLParam(r, "commitID")
+
+	commit, err := h.svc.GetCommit(r.Context(), repoID, commitID)
+	if err != nil {
+		writeAppError(w, core.MapDomainError(err))
+		return
 	}
-	writeJSON(w, http.StatusCreated, resp)
+
+	writeJSON(w, http.StatusOK, toCommitResponse(commit))
 }
 
 func (h *CommitHandler) ListCommits(w http.ResponseWriter, r *http.Request) {
@@ -192,55 +173,19 @@ func (h *CommitHandler) ListCommits(w http.ResponseWriter, r *http.Request) {
 		Cursor:    q.Get("cursor"),
 	})
 	if err != nil {
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		// check for validation errors
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "timestamp") || strings.Contains(errMsg, "traversal") {
-			badRequest(w, err.Error())
-			return
-		}
-		internalError(w)
+		writeAppError(w, core.MapDomainError(err))
 		return
 	}
 
 	resp := listCommitsResponse{
-		Commits: make([]commitResponse, 0, len(result.Commits)),
+		Commits:    make([]commitResponse, 0, len(result.Commits)),
+		NextCursor: result.NextCursor,
 	}
-	for _, commit := range result.Commits {
-		resp.Commits = append(resp.Commits, toCommitResponse(commit))
-	}
-	if result.NextCursor != "" {
-		resp.NextCursor = &result.NextCursor
+	for _, c := range result.Commits {
+		resp.Commits = append(resp.Commits, toCommitResponse(c))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func (h *CommitHandler) GetCommit(w http.ResponseWriter, r *http.Request) {
-	repoID := chi.URLParam(r, "repoID")
-	commitID := chi.URLParam(r, "commitID")
-
-	commit, err := h.svc.GetCommit(r.Context(), repoID, commitID)
-	if err != nil {
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		if errors.Is(err, domain.ErrCommitNotFound) {
-			notFound(w, "commit_not_found",
-				fmt.Sprintf("Commit %q does not exist in repository %q.", commitID, repoID))
-			return
-		}
-		internalError(w)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, toCommitResponse(commit))
 }
 
 func (h *CommitHandler) GetParents(w http.ResponseWriter, r *http.Request) {
@@ -249,17 +194,7 @@ func (h *CommitHandler) GetParents(w http.ResponseWriter, r *http.Request) {
 
 	parents, err := h.svc.GetParents(r.Context(), repoID, commitID)
 	if err != nil {
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		if errors.Is(err, domain.ErrCommitNotFound) {
-			notFound(w, "commit_not_found",
-				fmt.Sprintf("Commit %q does not exist in repository %q.", commitID, repoID))
-			return
-		}
-		internalError(w)
+		writeAppError(w, core.MapDomainError(err))
 		return
 	}
 
@@ -267,9 +202,26 @@ func (h *CommitHandler) GetParents(w http.ResponseWriter, r *http.Request) {
 		CommitID: commitID,
 		Parents:  make([]commitResponse, 0, len(parents)),
 	}
-	for _, parent := range parents {
-		resp.Parents = append(resp.Parents, toCommitResponse(parent))
+	for _, p := range parents {
+		resp.Parents = append(resp.Parents, toCommitResponse(p))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func toCommitResponse(c *domain.Commit) commitResponse {
+	return commitResponse{
+		ID:        c.ID,
+		RepoID:    c.RepoID,
+		ParentIDs: c.ParentIDs,
+		DataPointer: dataPointerResponse{
+			Type:     c.DataPointer.Type,
+			Location: c.DataPointer.Location,
+			Hash:     c.DataPointer.Hash,
+			Metadata: c.DataPointer.Metadata,
+		},
+		Message:   c.Message,
+		Author:    c.Author,
+		Timestamp: c.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
+	}
 }

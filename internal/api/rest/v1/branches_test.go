@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
 	"github.com/bhpcv252/verge/internal/service"
-	"github.com/bhpcv252/verge/internal/storage/postgres"
 	"github.com/bhpcv252/verge/testhelper"
 )
 
@@ -61,7 +61,7 @@ func (m *mockBranchService) DeleteBranch(ctx context.Context, repoID, name strin
 
 // helper
 
-func newBranchTestRouter(svc BranchService) http.Handler {
+func newBranchTestRouter(svc core.BranchService) http.Handler {
 	return NewRouter(
 		nil, // repoHandler
 		NewBranchHandler(svc),
@@ -99,7 +99,7 @@ func TestCreateBranch_ValidBody_Returns201AndCallsServiceWithCorrectInput(t *tes
 	assert.Equal(t, "main", got.Name)
 	assert.Equal(t, "repo_abc123", got.RepoID)
 	assert.Equal(t, "commit_xyz789", got.CommitID)
-	assert.False(t, got.CreatedAt.IsZero())
+	assert.NotEmpty(t, got.CreatedAt)
 
 	assert.Equal(t, "repo_abc123", capturedInput.RepoID)
 	assert.Equal(t, "main", capturedInput.Name)
@@ -368,11 +368,11 @@ func TestListBranches_WithNextCursor_IncludedInResponse(t *testing.T) {
 
 	var got listBranchesResponse
 	testhelper.DecodeBody(t, w, &got)
-	require.NotNil(t, got.NextCursor)
-	assert.Equal(t, "next-page-abc", *got.NextCursor)
+	require.NotEmpty(t, got.NextCursor)
+	assert.Equal(t, "next-page-abc", got.NextCursor)
 }
 
-func TestListBranches_NoNextCursor_NullInResponse(t *testing.T) {
+func TestListBranches_NoNextCursor_OmittedFromResponse(t *testing.T) {
 	svc := &mockBranchService{
 		listFn: func(_ context.Context, _ service.ListBranchesInput) (*service.ListBranchesResult, error) {
 			return &service.ListBranchesResult{
@@ -387,7 +387,7 @@ func TestListBranches_NoNextCursor_NullInResponse(t *testing.T) {
 
 	var got listBranchesResponse
 	testhelper.DecodeBody(t, w, &got)
-	assert.Nil(t, got.NextCursor)
+	assert.Empty(t, got.NextCursor)
 }
 
 func TestListBranches_RepoNotFound_Returns404(t *testing.T) {
@@ -478,7 +478,11 @@ func TestAdvanceBranch_MissingExpectedCommitID_Returns400BeforeServiceIsCalled(t
 func TestAdvanceBranch_BranchConflict_Returns409WithCurrentHead(t *testing.T) {
 	svc := &mockBranchService{
 		advanceFn: func(_ context.Context, _ service.AdvanceBranchInput) (*domain.Branch, error) {
-			return nil, &postgres.BranchConflictError{CurrentHead: "commit_actual"}
+			return nil, &service.BranchConflictError{
+				BranchName:   "main",
+				CurrentHead:  "commit_actual",
+				ExpectedHead: "commit_old",
+			}
 		},
 	}
 

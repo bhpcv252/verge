@@ -4,16 +4,15 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	vergev1 "github.com/bhpcv252/verge/api/proto/verge/v1"
 	"github.com/bhpcv252/verge/internal/domain"
 	"github.com/bhpcv252/verge/internal/service"
+	"github.com/bhpcv252/verge/testhelper"
 )
 
 // mock
@@ -42,20 +41,6 @@ func (m *mockRepoService) ListRepos(
 	return m.listFn(ctx, in)
 }
 
-func fixedRepo() *domain.Repo {
-	return &domain.Repo{
-		ID:            "repo_abc123",
-		Name:          "my-doc",
-		DefaultBranch: "main",
-		CreatedAt:     time.Date(2024, 4, 5, 10, 0, 0, 0, time.UTC),
-	}
-}
-
-func grpcCode(err error) codes.Code {
-	s, _ := status.FromError(err)
-	return s.Code()
-}
-
 // CreateRepo
 
 func TestCreateRepo_ValidRequest_CallsServiceWithCorrectInputAndReturnsRepo(t *testing.T) {
@@ -64,7 +49,7 @@ func TestCreateRepo_ValidRequest_CallsServiceWithCorrectInputAndReturnsRepo(t *t
 	srv := NewRepoServer(&mockRepoService{
 		createFn: func(_ context.Context, in service.CreateRepoInput) (*domain.Repo, error) {
 			captured = in
-			return fixedRepo(), nil
+			return testhelper.FixedRepo(), nil
 		},
 	})
 
@@ -97,7 +82,7 @@ func TestCreateRepo_MissingName_ReturnsInvalidArgument(t *testing.T) {
 	})
 
 	require.Error(t, err)
-	assert.Equal(t, codes.InvalidArgument, grpcCode(err))
+	assert.Equal(t, codes.InvalidArgument, testhelper.GRPCCode(err))
 	assert.False(t, called, "service should not be called when name is missing")
 }
 
@@ -115,7 +100,7 @@ func TestCreateRepo_MissingDefaultBranch_ReturnsInvalidArgument(t *testing.T) {
 	})
 
 	require.Error(t, err)
-	assert.Equal(t, codes.InvalidArgument, grpcCode(err))
+	assert.Equal(t, codes.InvalidArgument, testhelper.GRPCCode(err))
 	assert.False(t, called)
 }
 
@@ -132,13 +117,13 @@ func TestCreateRepo_ServiceReturnsUnexpectedError_ReturnsInternal(t *testing.T) 
 	})
 
 	require.Error(t, err)
-	assert.Equal(t, codes.Internal, grpcCode(err))
+	assert.Equal(t, codes.Internal, testhelper.GRPCCode(err))
 }
 
 func TestCreateRepo_CreatedAtIsISO8601(t *testing.T) {
 	srv := NewRepoServer(&mockRepoService{
 		createFn: func(_ context.Context, _ service.CreateRepoInput) (*domain.Repo, error) {
-			return fixedRepo(), nil
+			return testhelper.FixedRepo(), nil
 		},
 	})
 
@@ -157,7 +142,7 @@ func TestGetRepo_RepoExists_ReturnsCorrectRepo(t *testing.T) {
 	srv := NewRepoServer(&mockRepoService{
 		getFn: func(_ context.Context, id string) (*domain.Repo, error) {
 			assert.Equal(t, "repo_abc123", id)
-			return fixedRepo(), nil
+			return testhelper.FixedRepo(), nil
 		},
 	})
 
@@ -173,7 +158,7 @@ func TestGetRepo_RepoIDFromRequestPassedToService(t *testing.T) {
 	srv := NewRepoServer(&mockRepoService{
 		getFn: func(_ context.Context, id string) (*domain.Repo, error) {
 			assert.Equal(t, "repo_xyz999", id)
-			return fixedRepo(), nil
+			return testhelper.FixedRepo(), nil
 		},
 	})
 
@@ -193,7 +178,7 @@ func TestGetRepo_EmptyRepoID_ReturnsInvalidArgument(t *testing.T) {
 	_, err := srv.GetRepo(context.Background(), &vergev1.GetRepoRequest{})
 
 	require.Error(t, err)
-	assert.Equal(t, codes.InvalidArgument, grpcCode(err))
+	assert.Equal(t, codes.InvalidArgument, testhelper.GRPCCode(err))
 	assert.False(t, called)
 }
 
@@ -207,7 +192,7 @@ func TestGetRepo_ServiceReturnsRepoNotFound_ReturnsNotFound(t *testing.T) {
 	_, err := srv.GetRepo(context.Background(), &vergev1.GetRepoRequest{RepoId: "repo_missing"})
 
 	require.Error(t, err)
-	assert.Equal(t, codes.NotFound, grpcCode(err))
+	assert.Equal(t, codes.NotFound, testhelper.GRPCCode(err))
 }
 
 func TestGetRepo_ServiceReturnsUnexpectedError_ReturnsInternal(t *testing.T) {
@@ -220,7 +205,7 @@ func TestGetRepo_ServiceReturnsUnexpectedError_ReturnsInternal(t *testing.T) {
 	_, err := srv.GetRepo(context.Background(), &vergev1.GetRepoRequest{RepoId: "repo_abc"})
 
 	require.Error(t, err)
-	assert.Equal(t, codes.Internal, grpcCode(err))
+	assert.Equal(t, codes.Internal, testhelper.GRPCCode(err))
 }
 
 // ListRepos
@@ -230,7 +215,7 @@ func TestListRepos_ZeroLimit_DefaultsTo20AndPassesToService(t *testing.T) {
 		listFn: func(_ context.Context, in service.ListReposInput) (*service.ListReposResult, error) {
 			assert.Equal(t, 20, in.Limit)
 			assert.Equal(t, "", in.Cursor)
-			return &service.ListReposResult{Repos: []*domain.Repo{fixedRepo()}}, nil
+			return &service.ListReposResult{Repos: []*domain.Repo{testhelper.FixedRepo()}}, nil
 		},
 	})
 
@@ -276,7 +261,7 @@ func TestListRepos_LimitOutOfRange_ReturnsInvalidArgument(t *testing.T) {
 			)
 
 			require.Error(t, err)
-			assert.Equal(t, codes.InvalidArgument, grpcCode(err))
+			assert.Equal(t, codes.InvalidArgument, testhelper.GRPCCode(err))
 			assert.False(t, called)
 		})
 	}
@@ -298,7 +283,7 @@ func TestListRepos_WithNextCursor_IncludedInResponse(t *testing.T) {
 	srv := NewRepoServer(&mockRepoService{
 		listFn: func(_ context.Context, _ service.ListReposInput) (*service.ListReposResult, error) {
 			return &service.ListReposResult{
-				Repos:      []*domain.Repo{fixedRepo()},
+				Repos:      []*domain.Repo{testhelper.FixedRepo()},
 				NextCursor: "next-page-abc",
 			}, nil
 		},
@@ -314,7 +299,7 @@ func TestListRepos_NoNextCursor_EmptyStringInResponse(t *testing.T) {
 	srv := NewRepoServer(&mockRepoService{
 		listFn: func(_ context.Context, _ service.ListReposInput) (*service.ListReposResult, error) {
 			return &service.ListReposResult{
-				Repos:      []*domain.Repo{fixedRepo()},
+				Repos:      []*domain.Repo{testhelper.FixedRepo()},
 				NextCursor: "",
 			}, nil
 		},
@@ -336,14 +321,14 @@ func TestListRepos_ServiceReturnsUnexpectedError_ReturnsInternal(t *testing.T) {
 	_, err := srv.ListRepos(context.Background(), &vergev1.ListReposRequest{})
 
 	require.Error(t, err)
-	assert.Equal(t, codes.Internal, grpcCode(err))
+	assert.Equal(t, codes.Internal, testhelper.GRPCCode(err))
 }
 
 func TestListRepos_ReposAreMappedCorrectly(t *testing.T) {
 	srv := NewRepoServer(&mockRepoService{
 		listFn: func(_ context.Context, _ service.ListReposInput) (*service.ListReposResult, error) {
 			return &service.ListReposResult{
-				Repos: []*domain.Repo{fixedRepo()},
+				Repos: []*domain.Repo{testhelper.FixedRepo()},
 			}, nil
 		},
 	})

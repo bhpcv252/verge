@@ -36,12 +36,7 @@ func TestMerges_Create_ValidInput_Returns201AndBranchPointsToMergeCommit(t *test
 	time.Sleep(10 * time.Millisecond)
 	commitFeature := createCommit(t, base, repo.ID, []string{root.ID})
 
-	// create main branch pointing to commit_main
-	createBranchResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "main",
-		"source_commit_id": commitMain.ID,
-	})
-	createBranchResp.Body.Close()
+	createBranch(t, base, repo.ID, "main", commitMain.ID)
 
 	// create merge
 	mergeResp := doPost(t, base+"/repos/"+repo.ID+"/merges", map[string]any{
@@ -90,12 +85,7 @@ func TestMerges_Create_NotExactlyTwoParents_Returns400WithInvalidRequest(t *test
 	repo := createRepo(t, base)
 	commit := createCommit(t, base, repo.ID, []string{})
 
-	// create branch
-	createBranchResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "main",
-		"source_commit_id": commit.ID,
-	})
-	createBranchResp.Body.Close()
+	createBranch(t, base, repo.ID, "main", commit.ID)
 
 	// try merge with only one parent
 	resp := doPost(t, base+"/repos/"+repo.ID+"/merges", map[string]any{
@@ -148,12 +138,7 @@ func TestMerges_Create_InvalidParent_Returns422WithInvalidParent(t *testing.T) {
 	repo := createRepo(t, base)
 	commit := createCommit(t, base, repo.ID, []string{})
 
-	// create branch
-	createBranchResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "main",
-		"source_commit_id": commit.ID,
-	})
-	createBranchResp.Body.Close()
+	createBranch(t, base, repo.ID, "main", commit.ID)
 
 	// try merge with invalid parent
 	resp := doPost(t, base+"/repos/"+repo.ID+"/merges", map[string]any{
@@ -186,12 +171,7 @@ func TestMerges_Create_StaleExpectedTargetHead_Returns409WithCurrentHead(t *test
 	time.Sleep(10 * time.Millisecond)
 	commit3 := createCommit(t, base, repo.ID, []string{commit2.ID})
 
-	// create branch pointing to commit2
-	createBranchResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "main",
-		"source_commit_id": commit2.ID,
-	})
-	createBranchResp.Body.Close()
+	createBranch(t, base, repo.ID, "main", commit2.ID)
 
 	// try to merge with stale expected head (commit1 instead of commit2)
 	resp := doPost(t, base+"/repos/"+repo.ID+"/merges", map[string]any{

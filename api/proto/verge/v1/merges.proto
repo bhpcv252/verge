@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package verge.v1;
+
+option go_package = "github.com/bhpcv252/verge/api/proto/verge/v1;vergev1";
+
+import "verge/v1/common.proto";
+
+service MergeService {
+  rpc CreateMerge (CreateMergeRequest) returns (Commit);
+}
+
+message CreateMergeRequest {
+  string          repo_id              = 1;
+  repeated string parent_ids           = 2;  // exactly two
+  string          expected_target_head = 3;  // required - optimistic lock
+  string          target_branch        = 4;
+  DataPointer     data_pointer         = 5;
+  string          message              = 6;
+  string          author               = 7;
+}

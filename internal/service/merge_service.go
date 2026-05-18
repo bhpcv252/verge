@@ -2,12 +2,14 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/bhpcv252/verge/internal/domain"
+	"github.com/bhpcv252/verge/internal/storage/postgres"
 )
 
 type MergeStore interface {
@@ -54,14 +56,14 @@ func (s *MergeService) CreateMerge(
 	ctx context.Context,
 	in CreateMergeInput,
 ) (*domain.Commit, error) {
-	// validate parent_ids count first,
-	// must be EXACTLY 2 for merge commits
+	// merge commits require exactly two parent_ids
 	if len(in.ParentIDs) != 2 {
-		return nil, fmt.Errorf("merge commits require exactly two parent_ids")
+		return nil, &ValidationError{Msg: "merge commits require exactly two parent_ids"}
 	}
 
+	// validate DataPointer
 	if err := in.DataPointer.Validate(); err != nil {
-		return nil, fmt.Errorf("service: create merge: %w", err)
+		return nil, &ValidationError{Msg: err.Error()}
 	}
 
 	_, err := s.repoStore.GetByID(ctx, in.RepoID)
@@ -80,7 +82,6 @@ func (s *MergeService) CreateMerge(
 		return nil, fmt.Errorf("service: create merge: %w", err)
 	}
 
-	// create merge commit with 2 parents
 	mergeCommit := &domain.Commit{
 		ID:          "commit_" + uuid.New().String(),
 		RepoID:      in.RepoID,
@@ -99,25 +100,17 @@ func (s *MergeService) CreateMerge(
 		in.ExpectedTargetHead,
 	)
 	if err != nil {
+		// translate postgres-level conflict into a service-level
+		var pgConflict *postgres.MergeBranchConflictError
+		if errors.As(err, &pgConflict) {
+			return nil, &MergeBranchConflictError{
+				BranchName:   pgConflict.BranchName,
+				CurrentHead:  pgConflict.CurrentHead,
+				ExpectedHead: pgConflict.ExpectedHead,
+			}
+		}
 		return nil, fmt.Errorf("service: create merge: %w", err)
 	}
 
 	return createdCommit, nil
-}
-
-// StaleMergeTargetError is returned when the target
-// branch has moved since expected_target_head was read
-type StaleMergeTargetError struct {
-	BranchName   string
-	CurrentHead  string
-	ExpectedHead string
-}
-
-func (e *StaleMergeTargetError) Error() string {
-	return fmt.Sprintf("stale merge target: branch %q is at %q but expected %q",
-		e.BranchName, e.CurrentHead, e.ExpectedHead)
-}
-
-func (e *StaleMergeTargetError) Is(target error) bool {
-	return target == domain.ErrStaleMergeTarget
 }

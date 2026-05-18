@@ -134,12 +134,7 @@ func TestBranches_Create_DuplicateName_Returns409WithBranchAlreadyExists(t *test
 	commit := createCommit(t, base, repo.ID, []string{})
 
 	// create first branch
-	resp1 := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "feature-x",
-		"source_commit_id": commit.ID,
-	})
-	resp1.Body.Close()
-	require.Equal(t, http.StatusCreated, resp1.StatusCode)
+	createBranch(t, base, repo.ID, "feature-x", commit.ID)
 
 	// try to create duplicate
 	resp2 := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
@@ -161,14 +156,8 @@ func TestBranches_Get_Exists_Returns200WithCorrectFields(t *testing.T) {
 	repo := createRepo(t, base)
 	commit := createCommit(t, base, repo.ID, []string{})
 
-	// create branch
-	createResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "feature-x",
-		"source_commit_id": commit.ID,
-	})
-	createResp.Body.Close()
+	createBranch(t, base, repo.ID, "feature-x", commit.ID)
 
-	// get the branch
 	getResp := doGet(t, base+"/repos/"+repo.ID+"/branches/feature-x")
 	defer getResp.Body.Close()
 
@@ -226,11 +215,7 @@ func TestBranches_List_Pagination_CursorWorksCorrectly(t *testing.T) {
 
 	// create 3 branches
 	for i := 0; i < 3; i++ {
-		resp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-			"name":             fmt.Sprintf("branch-%d", i),
-			"source_commit_id": commit.ID,
-		})
-		resp.Body.Close()
+		createBranch(t, base, repo.ID, fmt.Sprintf("branch-%d", i), commit.ID)
 		time.Sleep(10 * time.Millisecond) // ensure different created_at
 	}
 
@@ -274,14 +259,8 @@ func TestBranches_Advance_ValidInput_Returns200AndBranchPointsToNewCommit(t *tes
 	commit1 := createCommit(t, base, repo.ID, []string{})
 	commit2 := createCommit(t, base, repo.ID, []string{commit1.ID})
 
-	// create branch at commit1
-	createResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "main",
-		"source_commit_id": commit1.ID,
-	})
-	createResp.Body.Close()
+	createBranch(t, base, repo.ID, "main", commit1.ID)
 
-	// advance to commit2
 	advanceResp := doPatch(t, base+"/repos/"+repo.ID+"/branches/main", map[string]string{
 		"commit_id":          commit2.ID,
 		"expected_commit_id": commit1.ID,
@@ -302,12 +281,7 @@ func TestBranches_Advance_StaleExpectedCommitID_Returns409WithCurrentHead(t *tes
 	commit2 := createCommit(t, base, repo.ID, []string{commit1.ID})
 	commit3 := createCommit(t, base, repo.ID, []string{commit2.ID})
 
-	// create branch at commit2
-	createResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "main",
-		"source_commit_id": commit2.ID,
-	})
-	createResp.Body.Close()
+	createBranch(t, base, repo.ID, "main", commit2.ID)
 
 	// try to advance with stale expected (commit1 instead of commit2)
 	advanceResp := doPatch(t, base+"/repos/"+repo.ID+"/branches/main", map[string]string{
@@ -351,12 +325,7 @@ func TestBranches_Advance_CommitNotFound_Returns404(t *testing.T) {
 	repo := createRepo(t, base)
 	commit1 := createCommit(t, base, repo.ID, []string{})
 
-	// create branch
-	createResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "main",
-		"source_commit_id": commit1.ID,
-	})
-	createResp.Body.Close()
+	createBranch(t, base, repo.ID, "main", commit1.ID)
 
 	// try to advance to nonexistent commit
 	advanceResp := doPatch(t, base+"/repos/"+repo.ID+"/branches/main", map[string]string{
@@ -378,14 +347,8 @@ func TestBranches_Delete_Exists_Returns204AndBranchIsGone(t *testing.T) {
 	repo := createRepo(t, base)
 	commit := createCommit(t, base, repo.ID, []string{})
 
-	// create branch
-	createResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "feature-x",
-		"source_commit_id": commit.ID,
-	})
-	createResp.Body.Close()
+	createBranch(t, base, repo.ID, "feature-x", commit.ID)
 
-	// delete it
 	deleteResp := doDelete(t, base+"/repos/"+repo.ID+"/branches/feature-x")
 	defer deleteResp.Body.Close()
 
@@ -429,12 +392,7 @@ func TestBranches_Delete_DefaultBranch_Returns409WithCannotDeleteDefaultBranch(t
 
 	commit := createCommit(t, base, repo.ID, []string{})
 
-	// create the main branch
-	createBranchResp := doPost(t, base+"/repos/"+repo.ID+"/branches", map[string]string{
-		"name":             "main",
-		"source_commit_id": commit.ID,
-	})
-	createBranchResp.Body.Close()
+	createBranch(t, base, repo.ID, "main", commit.ID)
 
 	// try to delete main (the default branch)
 	deleteResp := doDelete(t, base+"/repos/"+repo.ID+"/branches/main")

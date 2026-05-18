@@ -23,17 +23,13 @@ func spinUpPostgres(t *testing.T) *RepoStore {
 
 func uniqueRepoName() string { return testhelper.UniqueName("test") }
 
-func newTestRepo(name string) *domain.Repo {
-	return testhelper.NewTestRepo(name)
-}
-
 // Insert
 
 func TestRepoStore_Insert_NewRepo_RowExistsInDB(t *testing.T) {
 	store := spinUpPostgres(t)
 	ctx := context.Background()
 
-	r := newTestRepo(uniqueRepoName())
+	r := testhelper.NewTestRepo(uniqueRepoName())
 	require.NoError(t, store.Create(ctx, r))
 
 	got, err := store.GetByID(ctx, r.ID)
@@ -47,7 +43,7 @@ func TestRepoStore_Insert_DuplicateID_Fails(t *testing.T) {
 	store := spinUpPostgres(t)
 	ctx := context.Background()
 
-	r := newTestRepo(uniqueRepoName())
+	r := testhelper.NewTestRepo(uniqueRepoName())
 	require.NoError(t, store.Create(ctx, r))
 
 	// try to insert another repo with the same ID
@@ -71,7 +67,7 @@ func TestRepoStore_GetByID_Exists_ReturnsCorrectStruct(t *testing.T) {
 	store := spinUpPostgres(t)
 	ctx := context.Background()
 
-	r := newTestRepo(uniqueRepoName())
+	r := testhelper.NewTestRepo(uniqueRepoName())
 	require.NoError(t, store.Create(ctx, r))
 
 	got, err := store.GetByID(ctx, r.ID)
@@ -107,7 +103,7 @@ func TestRepoStore_List_MultipleRepos_ReturnsDescendingOrder(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		r := newTestRepo(uniqueRepoName())
+		r := testhelper.NewTestRepo(uniqueRepoName())
 		r.CreatedAt = time.Now().UTC().Add(time.Duration(i) * time.Millisecond)
 		require.NoError(t, store.Create(ctx, r))
 	}
@@ -129,7 +125,7 @@ func TestRepoStore_List_CursorPagination_NoDuplicatesNoGaps(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		r := newTestRepo(uniqueRepoName())
+		r := testhelper.NewTestRepo(uniqueRepoName())
 		r.CreatedAt = time.Now().UTC().Add(time.Duration(i) * time.Millisecond)
 		require.NoError(t, store.Create(ctx, r))
 	}

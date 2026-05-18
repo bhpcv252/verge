@@ -68,32 +68,29 @@ func (s *CommitService) CreateCommit(
 	ctx context.Context,
 	in CreateCommitInput,
 ) (*CreateCommitResult, error) {
-	// Validate repo exists
+	// validate repo exists
 	_, err := s.repoStore.GetByID(ctx, in.RepoID)
 	if err != nil {
 		return nil, fmt.Errorf("service: create commit: %w", err)
 	}
 
+	// validate DataPointer fields
 	if err := in.DataPointer.Validate(); err != nil {
-		return nil, fmt.Errorf("service: create commit: %w", err)
+		return nil, &ValidationError{Msg: err.Error()}
 	}
 
-	// validate parent_ids count (0, 1, or reject 2+ which should use /merges)
+	// commits accept 0 or 1 parent
 	if len(in.ParentIDs) > 1 {
-		return nil, fmt.Errorf(
-			"commits accept zero or one parent_ids. For merge commits with two parents, use POST /repos/:repo_id/merges",
-		)
+		return nil, &ValidationError{
+			Msg: "commits accept zero or one parent_ids; use the merges endpoint for merge commits with two parents",
+		}
 	}
 
-	// check idempotency if key provided
+	// idempotency: return existing commit when key matches
 	if in.IdempotencyKey != "" {
 		existing, err := s.store.GetByIdempotencyKey(ctx, in.RepoID, in.IdempotencyKey)
 		if err == nil {
-			// found existing commit with same idempotency key
-			return &CreateCommitResult{
-				Commit:   existing,
-				Existing: true,
-			}, nil
+			return &CreateCommitResult{Commit: existing, Existing: true}, nil
 		}
 		if err != domain.ErrCommitNotFound {
 			return nil, fmt.Errorf("service: create commit: check idempotency: %w", err)
@@ -101,7 +98,7 @@ func (s *CommitService) CreateCommit(
 		// not found, proceed with creation
 	}
 
-	// validate parent_ids exist in this repo
+	// validate parent_ids exist in this repo.
 	if len(in.ParentIDs) > 0 {
 		if err := s.store.ValidateParentsExist(ctx, in.RepoID, in.ParentIDs); err != nil {
 			return nil, fmt.Errorf("service: create commit: %w", err)
@@ -124,10 +121,7 @@ func (s *CommitService) CreateCommit(
 		return nil, fmt.Errorf("service: create commit: %w", err)
 	}
 
-	return &CreateCommitResult{
-		Commit:   createdCommit,
-		Existing: false,
-	}, nil
+	return &CreateCommitResult{Commit: createdCommit, Existing: false}, nil
 }
 
 func (s *CommitService) GetCommit(
@@ -168,31 +162,33 @@ func (s *CommitService) ListCommits(
 	if in.Since != "" {
 		t, err := time.Parse(time.RFC3339, in.Since)
 		if err != nil {
-			return nil, fmt.Errorf("service: list commits: invalid 'since' timestamp: %w", err)
+			return nil, &ValidationError{
+				Msg: fmt.Sprintf("'since' must be a valid ISO 8601 timestamp, got: %q", in.Since),
+			}
 		}
 		since = &t
 	}
 	if in.Until != "" {
 		t, err := time.Parse(time.RFC3339, in.Until)
 		if err != nil {
-			return nil, fmt.Errorf("service: list commits: invalid 'until' timestamp: %w", err)
+			return nil, &ValidationError{
+				Msg: fmt.Sprintf("'until' must be a valid ISO 8601 timestamp, got: %q", in.Until),
+			}
 		}
 		until = &t
 	}
 
 	traversal := in.Traversal
 	if traversal == "" {
-		traversal = "flat" // default
+		traversal = "flat"
 	}
 	if traversal != "flat" && traversal != "dag" {
-		return nil, fmt.Errorf("service: list commits: 'traversal' must be 'flat' or 'dag'")
+		return nil, &ValidationError{Msg: "'traversal' must be 'flat' or 'dag'"}
 	}
 
-	// DAG traversal requires a branch parameter (starting point)
+	// DAG traversal requires a branch as starting point
 	if traversal == "dag" && in.Branch == "" {
-		return nil, fmt.Errorf(
-			"service: list commits: 'traversal=dag' requires a 'branch' parameter",
-		)
+		return nil, &ValidationError{Msg: "'traversal=dag' requires a 'branch' parameter"}
 	}
 
 	page, err := s.store.List(ctx, postgres.ListCommitsFilter{

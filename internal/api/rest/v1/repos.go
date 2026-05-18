@@ -1,32 +1,23 @@
 package v1
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
 	"github.com/bhpcv252/verge/internal/service"
 )
 
-type RepoService interface {
-	CreateRepo(ctx context.Context, in service.CreateRepoInput) (*domain.Repo, error)
-	GetRepo(ctx context.Context, id string) (*domain.Repo, error)
-	ListRepos(ctx context.Context, in service.ListReposInput) (*service.ListReposResult, error)
-}
-
 type RepoHandler struct {
-	svc RepoService
+	svc core.RepoService
 }
 
-func NewRepoHandler(svc RepoService) *RepoHandler {
+func NewRepoHandler(svc core.RepoService) *RepoHandler {
 	return &RepoHandler{svc: svc}
 }
 
@@ -42,30 +33,21 @@ type createRepoRequest struct {
 }
 
 type repoResponse struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	DefaultBranch string    `json:"default_branch"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	DefaultBranch string `json:"default_branch"`
+	CreatedAt     string `json:"created_at"`
 }
 
 type listReposResponse struct {
 	Repos      []repoResponse `json:"repos"`
-	NextCursor *string        `json:"next_cursor"` // null when there is no next page
-}
-
-func toRepoResponse(r *domain.Repo) repoResponse {
-	return repoResponse{
-		ID:            r.ID,
-		Name:          r.Name,
-		DefaultBranch: r.DefaultBranch,
-		CreatedAt:     r.CreatedAt,
-	}
+	NextCursor string         `json:"next_cursor,omitempty"`
 }
 
 func (h *RepoHandler) CreateRepo(w http.ResponseWriter, r *http.Request) {
 	var req createRepoRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		badRequest(w, "Request body must be valid JSON.")
+		badRequest(w, "request body must be valid JSON")
 		return
 	}
 
@@ -86,18 +68,28 @@ func (h *RepoHandler) CreateRepo(w http.ResponseWriter, r *http.Request) {
 		DefaultBranch: req.DefaultBranch,
 	})
 	if err != nil {
-		internalError(w)
+		writeAppError(w, core.MapDomainError(err))
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, toRepoResponse(repo))
 }
 
-func (h *RepoHandler) ListRepos(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+func (h *RepoHandler) GetRepo(w http.ResponseWriter, r *http.Request) {
+	repoID := chi.URLParam(r, "repoID")
 
+	repo, err := h.svc.GetRepo(r.Context(), repoID)
+	if err != nil {
+		writeAppError(w, core.MapDomainError(err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toRepoResponse(repo))
+}
+
+func (h *RepoHandler) ListRepos(w http.ResponseWriter, r *http.Request) {
 	limit := 20
-	if raw := q.Get("limit"); raw != "" {
+	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 || n > 100 {
 			badRequest(w, "'limit' must be an integer between 1 and 100.")
@@ -108,39 +100,29 @@ func (h *RepoHandler) ListRepos(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.svc.ListRepos(r.Context(), service.ListReposInput{
 		Limit:  limit,
-		Cursor: q.Get("cursor"),
+		Cursor: r.URL.Query().Get("cursor"),
 	})
 	if err != nil {
-		internalError(w)
+		writeAppError(w, core.MapDomainError(err))
 		return
 	}
 
 	resp := listReposResponse{
-		Repos: make([]repoResponse, 0, len(result.Repos)),
+		Repos:      make([]repoResponse, 0, len(result.Repos)),
+		NextCursor: result.NextCursor,
 	}
 	for _, repo := range result.Repos {
 		resp.Repos = append(resp.Repos, toRepoResponse(repo))
-	}
-	if result.NextCursor != "" {
-		resp.NextCursor = &result.NextCursor
 	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (h *RepoHandler) GetRepo(w http.ResponseWriter, r *http.Request) {
-	repoID := chi.URLParam(r, "repoID")
-
-	repo, err := h.svc.GetRepo(r.Context(), repoID)
-	if err != nil {
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		internalError(w)
-		return
+func toRepoResponse(r *domain.Repo) repoResponse {
+	return repoResponse{
+		ID:            r.ID,
+		Name:          r.Name,
+		DefaultBranch: r.DefaultBranch,
+		CreatedAt:     r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
-
-	writeJSON(w, http.StatusOK, toRepoResponse(repo))
 }

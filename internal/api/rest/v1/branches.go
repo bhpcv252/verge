@@ -1,38 +1,23 @@
 package v1
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
 	"github.com/bhpcv252/verge/internal/service"
-	"github.com/bhpcv252/verge/internal/storage/postgres"
 )
 
-type BranchService interface {
-	CreateBranch(ctx context.Context, in service.CreateBranchInput) (*domain.Branch, error)
-	GetBranch(ctx context.Context, repoID, name string) (*domain.Branch, error)
-	ListBranches(
-		ctx context.Context,
-		in service.ListBranchesInput,
-	) (*service.ListBranchesResult, error)
-	AdvanceBranch(ctx context.Context, in service.AdvanceBranchInput) (*domain.Branch, error)
-	DeleteBranch(ctx context.Context, repoID, name string) error
-}
-
 type BranchHandler struct {
-	svc BranchService
+	svc core.BranchService
 }
 
-func NewBranchHandler(svc BranchService) *BranchHandler {
+func NewBranchHandler(svc core.BranchService) *BranchHandler {
 	return &BranchHandler{svc: svc}
 }
 
@@ -55,24 +40,15 @@ type advanceBranchRequest struct {
 }
 
 type branchResponse struct {
-	Name      string    `json:"name"`
-	RepoID    string    `json:"repo_id"`
-	CommitID  string    `json:"commit_id"`
-	CreatedAt time.Time `json:"created_at"`
+	Name      string `json:"name"`
+	RepoID    string `json:"repo_id"`
+	CommitID  string `json:"commit_id"`
+	CreatedAt string `json:"created_at"`
 }
 
 type listBranchesResponse struct {
 	Branches   []branchResponse `json:"branches"`
-	NextCursor *string          `json:"next_cursor"` // null when there is no next page
-}
-
-func toBranchResponse(b *domain.Branch) branchResponse {
-	return branchResponse{
-		Name:      b.Name,
-		RepoID:    b.RepoID,
-		CommitID:  b.CommitID,
-		CreatedAt: b.CreatedAt,
-	}
+	NextCursor string           `json:"next_cursor,omitempty"`
 }
 
 func (h *BranchHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +56,7 @@ func (h *BranchHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 
 	var req createBranchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		badRequest(w, "Request body must be valid JSON.")
+		badRequest(w, "request body must be valid JSON")
 		return
 	}
 
@@ -102,42 +78,31 @@ func (h *BranchHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 		SourceCommitID: req.SourceCommitID,
 	})
 	if err != nil {
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		if errors.Is(err, domain.ErrBranchAlreadyExists) {
-			conflict(w, "branch_already_exists",
-				fmt.Sprintf("Branch %q already exists in repository %q.", req.Name, repoID),
-				nil)
-			return
-		}
-		if errors.Is(err, domain.ErrCommitNotFound) {
-			notFound(
-				w,
-				"commit_not_found",
-				fmt.Sprintf(
-					"Commit %q does not exist in repository %q.",
-					req.SourceCommitID,
-					repoID,
-				),
-			)
-			return
-		}
-		internalError(w)
+		writeAppError(w, core.MapDomainError(err))
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, toBranchResponse(branch))
 }
 
+func (h *BranchHandler) GetBranch(w http.ResponseWriter, r *http.Request) {
+	repoID := chi.URLParam(r, "repoID")
+	name := chi.URLParam(r, "name")
+
+	branch, err := h.svc.GetBranch(r.Context(), repoID, name)
+	if err != nil {
+		writeAppError(w, core.MapDomainError(err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toBranchResponse(branch))
+}
+
 func (h *BranchHandler) ListBranches(w http.ResponseWriter, r *http.Request) {
 	repoID := chi.URLParam(r, "repoID")
-	q := r.URL.Query()
 
 	limit := 20
-	if raw := q.Get("limit"); raw != "" {
+	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 || n > 100 {
 			badRequest(w, "'limit' must be an integer between 1 and 100.")
@@ -149,52 +114,22 @@ func (h *BranchHandler) ListBranches(w http.ResponseWriter, r *http.Request) {
 	result, err := h.svc.ListBranches(r.Context(), service.ListBranchesInput{
 		RepoID: repoID,
 		Limit:  limit,
-		Cursor: q.Get("cursor"),
+		Cursor: r.URL.Query().Get("cursor"),
 	})
 	if err != nil {
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		internalError(w)
+		writeAppError(w, core.MapDomainError(err))
 		return
 	}
 
 	resp := listBranchesResponse{
-		Branches: make([]branchResponse, 0, len(result.Branches)),
+		Branches:   make([]branchResponse, 0, len(result.Branches)),
+		NextCursor: result.NextCursor,
 	}
-	for _, branch := range result.Branches {
-		resp.Branches = append(resp.Branches, toBranchResponse(branch))
-	}
-	if result.NextCursor != "" {
-		resp.NextCursor = &result.NextCursor
+	for _, b := range result.Branches {
+		resp.Branches = append(resp.Branches, toBranchResponse(b))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func (h *BranchHandler) GetBranch(w http.ResponseWriter, r *http.Request) {
-	repoID := chi.URLParam(r, "repoID")
-	name := chi.URLParam(r, "name")
-
-	branch, err := h.svc.GetBranch(r.Context(), repoID, name)
-	if err != nil {
-		if errors.Is(err, domain.ErrBranchNotFound) {
-			notFound(w, "branch_not_found",
-				fmt.Sprintf("Branch %q does not exist in repository %q.", name, repoID))
-			return
-		}
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		internalError(w)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, toBranchResponse(branch))
 }
 
 func (h *BranchHandler) AdvanceBranch(w http.ResponseWriter, r *http.Request) {
@@ -203,7 +138,7 @@ func (h *BranchHandler) AdvanceBranch(w http.ResponseWriter, r *http.Request) {
 
 	var req advanceBranchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		badRequest(w, "Request body must be valid JSON.")
+		badRequest(w, "request body must be valid JSON")
 		return
 	}
 
@@ -226,38 +161,7 @@ func (h *BranchHandler) AdvanceBranch(w http.ResponseWriter, r *http.Request) {
 		ExpectedCommitID: req.ExpectedCommitID,
 	})
 	if err != nil {
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		if errors.Is(err, domain.ErrBranchNotFound) {
-			notFound(w, "branch_not_found",
-				fmt.Sprintf("Branch %q does not exist in repository %q.", name, repoID))
-			return
-		}
-		if errors.Is(err, domain.ErrCommitNotFound) {
-			notFound(w, "commit_not_found",
-				fmt.Sprintf("Commit %q does not exist in repository %q.", req.CommitID, repoID))
-			return
-		}
-		// check for branch conflict with current head
-		var conflictErr *postgres.BranchConflictError
-		if errors.As(err, &conflictErr) {
-			conflict(
-				w,
-				"branch_conflict",
-				fmt.Sprintf(
-					"Branch %q has advanced. Current head is %q but expected %q. Fetch latest head and retry.",
-					name,
-					conflictErr.CurrentHead,
-					req.ExpectedCommitID,
-				),
-				&conflictErr.CurrentHead,
-			)
-			return
-		}
-		internalError(w)
+		writeAppError(w, core.MapDomainError(err))
 		return
 	}
 
@@ -268,33 +172,19 @@ func (h *BranchHandler) DeleteBranch(w http.ResponseWriter, r *http.Request) {
 	repoID := chi.URLParam(r, "repoID")
 	name := chi.URLParam(r, "name")
 
-	err := h.svc.DeleteBranch(r.Context(), repoID, name)
-	if err != nil {
-		if errors.Is(err, domain.ErrRepoNotFound) {
-			notFound(w, "repo_not_found",
-				fmt.Sprintf("Repository %q does not exist.", repoID))
-			return
-		}
-		if errors.Is(err, domain.ErrBranchNotFound) {
-			notFound(w, "branch_not_found",
-				fmt.Sprintf("Branch %q does not exist in repository %q.", name, repoID))
-			return
-		}
-		if errors.Is(err, domain.ErrCannotDeleteDefaultBranch) {
-			conflict(
-				w,
-				"cannot_delete_default_branch",
-				fmt.Sprintf(
-					"Cannot delete the default branch %q. Set a different default branch first.",
-					name,
-				),
-				nil,
-			)
-			return
-		}
-		internalError(w)
+	if err := h.svc.DeleteBranch(r.Context(), repoID, name); err != nil {
+		writeAppError(w, core.MapDomainError(err))
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func toBranchResponse(b *domain.Branch) branchResponse {
+	return branchResponse{
+		Name:      b.Name,
+		RepoID:    b.RepoID,
+		CommitID:  b.CommitID,
+		CreatedAt: b.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
 }

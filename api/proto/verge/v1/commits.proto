@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package verge.v1;
+
+option go_package = "github.com/bhpcv252/verge/api/proto/verge/v1;vergev1";
+
+import "verge/v1/common.proto";
+
+service CommitService {
+  rpc CreateCommit (CreateCommitRequest) returns (CreateCommitResponse);
+  rpc GetCommit    (GetCommitRequest)    returns (Commit);
+  rpc ListCommits  (ListCommitsRequest)  returns (ListCommitsResponse);
+  rpc GetParents   (GetParentsRequest)   returns (GetParentsResponse);
+}
+
+message CreateCommitRequest {
+  string          repo_id         = 1;
+  repeated string parent_ids      = 2;
+  string          expected_head   = 3;  // optional - optimistic check
+  DataPointer     data_pointer    = 4;
+  string          message         = 5;
+  string          author          = 6;
+  string          idempotency_key = 7;  // optional - client-generated UUID
+}
+
+message CreateCommitResponse {
+  Commit commit   = 1;
+  bool   existing = 2;  // true if idempotency_key matched an existing commit
+}
+
+message GetCommitRequest {
+  string repo_id   = 1;
+  string commit_id = 2;
+}
+
+message ListCommitsRequest {
+  string repo_id   = 1;
+  string branch    = 2;
+  string author    = 3;
+  string since     = 4;  // ISO 8601
+  string until     = 5;  // ISO 8601
+  string traversal = 6;  // "flat" | "dag"
+  int32  limit     = 7;
+  string cursor    = 8;
+}
+
+message ListCommitsResponse {
+  repeated Commit commits     = 1;
+  string          next_cursor = 2;
+}
+
+message GetParentsRequest {
+  string repo_id   = 1;
+  string commit_id = 2;
+}
+
+message GetParentsResponse {
+  string          commit_id = 1;
+  repeated Commit parents   = 2;
+}
+
