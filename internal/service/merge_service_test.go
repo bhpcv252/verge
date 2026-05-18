@@ -218,7 +218,7 @@ func TestCreateMerge_StaleExpectedTargetHead_ReturnsError(t *testing.T) {
 
 	assert.ErrorIs(t, err, domain.ErrStaleMergeTarget)
 
-	var conflictErr *postgres.MergeBranchConflictError
+	var conflictErr *MergeBranchConflictError
 	require.ErrorAs(t, err, &conflictErr)
 	assert.Equal(t, "commit_actual", conflictErr.CurrentHead)
 }

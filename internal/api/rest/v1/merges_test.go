@@ -11,9 +11,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
 	"github.com/bhpcv252/verge/internal/service"
-	"github.com/bhpcv252/verge/internal/storage/postgres"
 	"github.com/bhpcv252/verge/testhelper"
 )
 
@@ -32,7 +32,7 @@ func (m *mockMergeService) CreateMerge(
 
 // helper
 
-func newMergeTestRouter(svc MergeService) http.Handler {
+func newMergeTestRouter(svc core.MergeService) http.Handler {
 	return NewRouter(
 		nil, // repoHandler
 		nil, // branchHandler
@@ -306,7 +306,11 @@ func TestCreateMerge_InvalidParent_Returns422WithInvalidParentCode(t *testing.T)
 func TestCreateMerge_StaleMergeTarget_Returns409WithCurrentHead(t *testing.T) {
 	svc := &mockMergeService{
 		createFn: func(_ context.Context, _ service.CreateMergeInput) (*domain.Commit, error) {
-			return nil, &postgres.MergeBranchConflictError{CurrentHead: "commit_actual"}
+			return nil, &service.MergeBranchConflictError{
+				BranchName:   "main",
+				CurrentHead:  "commit_actual",
+				ExpectedHead: "commit_stale",
+			}
 		},
 	}
 

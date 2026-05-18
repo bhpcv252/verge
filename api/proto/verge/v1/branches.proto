@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package verge.v1;
+
+option go_package = "github.com/bhpcv252/verge/api/proto/verge/v1;vergev1";
+
+service BranchService {
+  rpc CreateBranch  (CreateBranchRequest)  returns (Branch);
+  rpc GetBranch     (GetBranchRequest)     returns (Branch);
+  rpc ListBranches  (ListBranchesRequest)  returns (ListBranchesResponse);
+  rpc AdvanceBranch (AdvanceBranchRequest) returns (Branch);
+  rpc DeleteBranch  (DeleteBranchRequest)  returns (DeleteBranchResponse);
+}
+
+message Branch {
+  string name       = 1;
+  string repo_id    = 2;
+  string commit_id  = 3;
+  string created_at = 4;  // ISO 8601
+}
+
+message CreateBranchRequest {
+  string repo_id          = 1;
+  string name             = 2;
+  string source_commit_id = 3;
+}
+
+message GetBranchRequest {
+  string repo_id = 1;
+  string name    = 2;
+}
+
+message ListBranchesRequest {
+  string repo_id = 1;
+  int32  limit   = 2;
+  string cursor  = 3;
+}
+
+message ListBranchesResponse {
+  repeated Branch branches    = 1;
+  string          next_cursor = 2;
+}
+
+message AdvanceBranchRequest {
+  string repo_id            = 1;
+  string name               = 2;
+  string commit_id          = 3;
+  string expected_commit_id = 4;  // required - optimistic lock
+}
+
+message DeleteBranchRequest {
+  string repo_id = 1;
+  string name    = 2;
+}
+
+message DeleteBranchResponse {}

@@ -34,6 +34,7 @@ func FixedCommit() *domain.Commit {
 		DataPointer: domain.DataPointer{
 			Type:     "db",
 			Location: "test/fixture",
+			Metadata: []byte(`{"key":"value"}`),
 		},
 		Message:   "Add feature",
 		Author:    "alice@example.com",
@@ -49,6 +50,7 @@ func FixedMergeCommit() *domain.Commit {
 		DataPointer: domain.DataPointer{
 			Type:     "db",
 			Location: "test/fixture",
+			Metadata: []byte(`{"key":"value"}`),
 		},
 		Message:   "Merge feature into main",
 		Author:    "alice@example.com",
@@ -73,9 +75,9 @@ func NewTestRepo(name string) *domain.Repo {
 	}
 }
 
-func NewTestBranch(repoID, name, commitID string) *domain.Branch {
+func NewTestBranch(repoID, commitID string) *domain.Branch {
 	return &domain.Branch{
-		Name:      name,
+		Name:      UniqueName("branch"),
 		RepoID:    repoID,
 		CommitID:  commitID,
 		CreatedAt: time.Now().UTC().Truncate(time.Microsecond),

@@ -164,6 +164,9 @@ func createRepo(t *testing.T, base string) repoResponse {
 		"default_branch": "main",
 	})
 	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "createRepo setup failed")
+
 	var repo repoResponse
 	decodeJSON(t, resp.Body, &repo)
 	return repo
@@ -181,6 +184,9 @@ func createCommit(t *testing.T, base, repoID string, parentIDs []string) commitR
 		"author":  "test@example.com",
 	})
 	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "createCommit setup failed")
+
 	var commit commitResponse
 	decodeJSON(t, resp.Body, &commit)
 	return commit
@@ -189,10 +195,13 @@ func createCommit(t *testing.T, base, repoID string, parentIDs []string) commitR
 func createBranch(t *testing.T, base, repoID, name, commitID string) branchResponse {
 	t.Helper()
 	resp := doPost(t, base+"/repos/"+repoID+"/branches", map[string]string{
-		"name":      name,
-		"commit_id": commitID,
+		"name":             name,
+		"source_commit_id": commitID,
 	})
 	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "createBranch setup failed")
+
 	var branch branchResponse
 	decodeJSON(t, resp.Body, &branch)
 	return branch

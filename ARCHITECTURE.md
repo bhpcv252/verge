@@ -97,8 +97,6 @@
 
 - PostgreSQL is always required as the source of truth
 
-- Support read replicas for PostgreSQL for horizontal scaling
-
 - Support Neo4j as an optional GraphStore for complex ancestry
   and merge-base queries when enabled by the operator
 

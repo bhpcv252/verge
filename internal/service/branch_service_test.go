@@ -384,11 +384,10 @@ func TestAdvanceBranch_OptimisticLockFails_ReturnsBranchConflict(t *testing.T) {
 		ExpectedCommitID: "commit_stale",
 	})
 
-	assert.ErrorIs(t, err, domain.ErrBranchConflict)
-
-	var conflictErr *postgres.BranchConflictError
+	var conflictErr *BranchConflictError
 	require.ErrorAs(t, err, &conflictErr)
 	assert.Equal(t, "commit_actual", conflictErr.CurrentHead)
+	assert.Equal(t, "commit_stale", conflictErr.ExpectedHead)
 }
 
 func TestAdvanceBranch_ValidInput_CallsStoreAdvance(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
 	"github.com/bhpcv252/verge/internal/service"
 	"github.com/bhpcv252/verge/testhelper"
@@ -56,7 +57,7 @@ func (m *mockCommitService) GetParents(
 
 // helper
 
-func newCommitTestRouter(svc CommitService) http.Handler {
+func newCommitTestRouter(svc core.CommitService) http.Handler {
 	return NewRouter(
 		nil, // repoHandler
 		nil, // branchHandler
@@ -97,7 +98,7 @@ func TestCreateCommit_ValidBody_Returns201AndCallsServiceWithCorrectInput(t *tes
 
 	require.Equal(t, http.StatusCreated, w.Code)
 
-	var got commitResponse
+	var got createCommitResponse
 	testhelper.DecodeBody(t, w, &got)
 	assert.Equal(t, "commit_abc123", got.ID)
 	assert.Equal(t, "repo_xyz789", got.RepoID)
@@ -109,6 +110,8 @@ func TestCreateCommit_ValidBody_Returns201AndCallsServiceWithCorrectInput(t *tes
 	assert.Equal(t, []string{"commit_parent"}, capturedInput.ParentIDs)
 	assert.Equal(t, "db", capturedInput.DataPointer.Type)
 	assert.Equal(t, "test/fixture", capturedInput.DataPointer.Location)
+	assert.NotEmpty(t, got.Timestamp)
+	assert.False(t, got.Existing)
 }
 
 func TestCreateCommit_IdempotencyKeyMatch_Returns200WithExistingTrue(t *testing.T) {
@@ -138,9 +141,10 @@ func TestCreateCommit_IdempotencyKeyMatch_Returns200WithExistingTrue(t *testing.
 
 	require.Equal(t, http.StatusOK, w.Code)
 
-	var got commitResponse
+	var got createCommitResponse
 	testhelper.DecodeBody(t, w, &got)
 	assert.Equal(t, "commit_abc123", got.ID)
+	assert.True(t, got.Existing)
 }
 
 func TestCreateCommit_InvalidJSON_Returns400BeforeServiceIsCalled(t *testing.T) {
@@ -572,7 +576,7 @@ func TestListCommits_TraversalDAGWithBranch_Returns200FollowsParents(t *testing.
 func TestListCommits_TraversalDAGWithoutBranch_Returns400(t *testing.T) {
 	svc := &mockCommitService{
 		listFn: func(_ context.Context, in service.ListCommitsInput) (*service.ListCommitsResult, error) {
-			return nil, errors.New("traversal=dag requires a 'branch' parameter")
+			return nil, &service.ValidationError{Msg: "traversal=dag requires a 'branch' parameter"}
 		},
 	}
 
@@ -599,11 +603,11 @@ func TestListCommits_WithNextCursor_IncludedInResponse(t *testing.T) {
 
 	var got listCommitsResponse
 	testhelper.DecodeBody(t, w, &got)
-	require.NotNil(t, got.NextCursor)
-	assert.Equal(t, "next-page-abc", *got.NextCursor)
+	require.NotEmpty(t, got.NextCursor)
+	assert.Equal(t, "next-page-abc", got.NextCursor)
 }
 
-func TestListCommits_NoNextCursor_NullInResponse(t *testing.T) {
+func TestListCommits_NoNextCursor_OmittedFromResponse(t *testing.T) {
 	svc := &mockCommitService{
 		listFn: func(_ context.Context, _ service.ListCommitsInput) (*service.ListCommitsResult, error) {
 			return &service.ListCommitsResult{
@@ -618,7 +622,7 @@ func TestListCommits_NoNextCursor_NullInResponse(t *testing.T) {
 
 	var got listCommitsResponse
 	testhelper.DecodeBody(t, w, &got)
-	assert.Nil(t, got.NextCursor)
+	assert.Empty(t, got.NextCursor)
 }
 
 func TestListCommits_RepoNotFound_Returns404(t *testing.T) {

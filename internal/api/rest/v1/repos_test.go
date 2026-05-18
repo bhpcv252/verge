@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
 	"github.com/bhpcv252/verge/internal/service"
 	"github.com/bhpcv252/verge/testhelper"
@@ -45,7 +46,7 @@ func (m *mockRepoService) ListRepos(
 
 // helpers
 
-func newTestRouter(svc RepoService) http.Handler {
+func newTestRouter(svc core.RepoService) http.Handler {
 	return NewRouter(
 		NewRepoHandler(svc),
 		nil, // branchHandler
@@ -77,7 +78,7 @@ func TestCreateRepo_ValidBody_Returns201AndCallsServiceWithCorrectInput(t *testi
 	testhelper.DecodeBody(t, w, &got)
 	assert.Equal(t, "repo_abc123", got.ID)
 	assert.Equal(t, "main", got.DefaultBranch)
-	assert.False(t, got.CreatedAt.IsZero())
+	assert.NotEmpty(t, got.CreatedAt)
 	assert.Equal(t, "my-doc", capturedInput.Name)
 	assert.Equal(t, "main", capturedInput.DefaultBranch)
 }
@@ -345,11 +346,11 @@ func TestListRepos_WithNextCursor_IncludedInResponse(t *testing.T) {
 
 	var got listReposResponse
 	testhelper.DecodeBody(t, w, &got)
-	require.NotNil(t, got.NextCursor)
-	assert.Equal(t, "next-page-abc", *got.NextCursor)
+	require.NotEmpty(t, got.NextCursor)
+	assert.Equal(t, "next-page-abc", got.NextCursor)
 }
 
-func TestListRepos_NoNextCursor_NullInResponse(t *testing.T) {
+func TestListRepos_NoNextCursor_OmittedFromResponse(t *testing.T) {
 	svc := &mockRepoService{
 		listFn: func(_ context.Context, _ service.ListReposInput) (*service.ListReposResult, error) {
 			return &service.ListReposResult{
@@ -364,7 +365,7 @@ func TestListRepos_NoNextCursor_NullInResponse(t *testing.T) {
 
 	var got listReposResponse
 	testhelper.DecodeBody(t, w, &got)
-	assert.Nil(t, got.NextCursor)
+	assert.Empty(t, got.NextCursor)
 }
 
 func TestListRepos_ServiceReturnsUnexpectedError_Returns500(t *testing.T) {

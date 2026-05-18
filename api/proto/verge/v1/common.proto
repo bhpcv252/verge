@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package verge.v1;
+
+option go_package = "github.com/bhpcv252/verge/api/proto/verge/v1;vergev1";
+
+message DataPointer {
+  string type     = 1;  // "s3" | "url" | "db" | "custom"
+  string location = 2;
+  string hash     = 3;  // optional - "sha256:..."
+  bytes  metadata = 4;  // optional - raw JSON bytes
+}
+
+message Commit {
+  string          id           = 1;
+  string          repo_id      = 2;
+  repeated string parent_ids   = 3;
+  DataPointer     data_pointer = 4;
+  string          message      = 5;
+  string          author       = 6;
+  string          timestamp    = 7;  // ISO 8601
+}
