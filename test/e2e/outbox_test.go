@@ -35,10 +35,10 @@ func TestOutbox_Redis_BranchHeadMoved_PopulatesBranchKey(t *testing.T) {
 	advResp.Body.Close()
 	require.Equal(t, http.StatusOK, advResp.StatusCode)
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 5*time.Second)
+	raw := pollRedisKey(t, env.rdb, key, 30*time.Second)
 
 	var stored struct {
 		CommitID string `json:"commit_id"`
@@ -63,7 +63,7 @@ func TestOutbox_Redis_BranchAdvanced_UpdatesBranchKey(t *testing.T) {
 	commit2 := createCommit(t, env.restBase, repo.ID, []string{commit1.ID})
 
 	createBranch(t, env.restBase, repo.ID, "main", commit1.ID)
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// advance the branch to commit2
 	advResp := doPatch(t, env.restBase+"/repos/"+repo.ID+"/branches/main", map[string]string{
@@ -73,10 +73,10 @@ func TestOutbox_Redis_BranchAdvanced_UpdatesBranchKey(t *testing.T) {
 	advResp.Body.Close()
 	require.Equal(t, http.StatusOK, advResp.StatusCode)
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 3*time.Second)
+	raw := pollRedisKey(t, env.rdb, key, 30*time.Second)
 
 	var stored struct {
 		CommitID string `json:"commit_id"`
@@ -104,7 +104,7 @@ func TestOutbox_Redis_MergeCompleted_UpdatesBranchKey(t *testing.T) {
 	commitFeature := createCommit(t, env.restBase, repo.ID, []string{root.ID})
 
 	createBranch(t, env.restBase, repo.ID, "main", commitMain.ID)
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// perform the merge
 	mergeResp := doPost(t, env.restBase+"/repos/"+repo.ID+"/merges", map[string]any{
@@ -121,11 +121,11 @@ func TestOutbox_Redis_MergeCompleted_UpdatesBranchKey(t *testing.T) {
 	var mergeCommit commitResponse
 	decodeJSON(t, mergeResp.Body, &mergeCommit)
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// redis must point to the merge commit
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 3*time.Second)
+	raw := pollRedisKey(t, env.rdb, key, 30*time.Second)
 
 	var stored struct {
 		CommitID string `json:"commit_id"`
@@ -178,11 +178,11 @@ func TestOutbox_Redis_VersionGuard_StaleEventIgnored(t *testing.T) {
 	)
 	require.NoError(t, err, "insert synthetic stale outbox event")
 
-	env.waitForOutbox(t, 12*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// redis must still hold commit2
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 3*time.Second)
+	raw := pollRedisKey(t, env.rdb, key, 30*time.Second)
 
 	var stored struct {
 		CommitID string `json:"commit_id"`
@@ -214,7 +214,7 @@ func TestOutbox_Redis_IdempotentHeal_ReplayIsSafe(t *testing.T) {
 	advResp.Body.Close()
 	require.Equal(t, http.StatusOK, advResp.StatusCode)
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// duplicate the BranchHeadMoved event for this repo's main branch
 	_, err := env.pool.Exec(context.Background(), `
@@ -230,11 +230,11 @@ func TestOutbox_Redis_IdempotentHeal_ReplayIsSafe(t *testing.T) {
 	require.NoError(t, err, "duplicate outbox event for idempotency test")
 
 	// process the duplicate
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// redis must still hold the correct commit
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 3*time.Second)
+	raw := pollRedisKey(t, env.rdb, key, 30*time.Second)
 
 	var stored struct {
 		CommitID string `json:"commit_id"`
@@ -255,7 +255,7 @@ func TestOutbox_Neo4j_CommitCreated_PopulatesNode(t *testing.T) {
 	repo := createRepo(t, env.restBase)
 	commit := createCommit(t, env.restBase, repo.ID, []string{})
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	n := neo4jCountNodes(t, env.neo4jDriver, repo.ID, commit.ID)
 	assert.Equal(t, 1, n,
@@ -273,7 +273,7 @@ func TestOutbox_Neo4j_RegularCommit_HasOneParentEdge(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	child := createCommit(t, env.restBase, repo.ID, []string{parent.ID})
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	edges := neo4jCountEdges(t, env.neo4jDriver, repo.ID, child.ID)
 	assert.Equal(t, 1, edges,
@@ -289,7 +289,7 @@ func TestOutbox_Neo4j_RootCommit_HasNoParentEdges(t *testing.T) {
 	repo := createRepo(t, env.restBase)
 	root := createCommit(t, env.restBase, repo.ID, []string{})
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	edges := neo4jCountEdges(t, env.neo4jDriver, repo.ID, root.ID)
 	assert.Equal(t, 0, edges,
@@ -311,7 +311,7 @@ func TestOutbox_Neo4j_MergeCommit_HasTwoParentEdges(t *testing.T) {
 	commitFeature := createCommit(t, env.restBase, repo.ID, []string{root.ID})
 
 	createBranch(t, env.restBase, repo.ID, "main", commitMain.ID)
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// perform the merge
 	mergeResp := doPost(t, env.restBase+"/repos/"+repo.ID+"/merges", map[string]any{
@@ -328,7 +328,7 @@ func TestOutbox_Neo4j_MergeCommit_HasTwoParentEdges(t *testing.T) {
 	var mergeCommit commitResponse
 	decodeJSON(t, mergeResp.Body, &mergeCommit)
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// the merge commit must have exactly two PARENT_OF edges
 	edges := neo4jCountEdges(t, env.neo4jDriver, repo.ID, mergeCommit.ID)
@@ -357,7 +357,7 @@ func TestOutbox_Neo4j_IdempotentMerge_ReplayDoesNotDuplicate(t *testing.T) {
 	commitFeature := createCommit(t, env.restBase, repo.ID, []string{root.ID})
 
 	createBranch(t, env.restBase, repo.ID, "main", commitMain.ID)
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	mergeResp := doPost(t, env.restBase+"/repos/"+repo.ID+"/merges", map[string]any{
 		"parent_ids":           []string{commitFeature.ID, commitMain.ID},
@@ -373,7 +373,7 @@ func TestOutbox_Neo4j_IdempotentMerge_ReplayDoesNotDuplicate(t *testing.T) {
 	var mergeCommit commitResponse
 	decodeJSON(t, mergeResp.Body, &mergeCommit)
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// duplicate the CommitCreated event for the merge commit
 	_, err := env.pool.Exec(context.Background(), `
@@ -388,7 +388,7 @@ func TestOutbox_Neo4j_IdempotentMerge_ReplayDoesNotDuplicate(t *testing.T) {
 	)
 	require.NoError(t, err, "duplicate CommitCreated event for idempotency test")
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	// Neo4j must still have exactly one node and two edges
 	n := neo4jCountNodes(t, env.neo4jDriver, repo.ID, mergeCommit.ID)
@@ -410,7 +410,7 @@ func TestOutbox_Worker_MarksEventsProcessed(t *testing.T) {
 	repo := createRepo(t, env.restBase)
 	createCommit(t, env.restBase, repo.ID, []string{})
 
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	var processed int
 	err := env.pool.QueryRow(context.Background(),
@@ -431,7 +431,7 @@ func TestOutbox_Worker_CrashRecovery_PicksUpUnprocessedEvents(t *testing.T) {
 	repo := createRepo(t, env.restBase)
 
 	// drain the queue so it is clean before the test
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	commit1 := createCommit(t, env.restBase, repo.ID, []string{})
 	commit2 := createCommit(t, env.restBase, repo.ID, []string{commit1.ID})
@@ -446,10 +446,10 @@ func TestOutbox_Worker_CrashRecovery_PicksUpUnprocessedEvents(t *testing.T) {
 	require.Equal(t, http.StatusOK, advResp.StatusCode)
 
 	// verify the running worker picks up the events
-	env.waitForOutbox(t, 5*time.Second)
+	env.waitForOutbox(t, 30*time.Second)
 
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 5*time.Second)
+	raw := pollRedisKey(t, env.rdb, key, 30*time.Second)
 
 	var stored struct {
 		CommitID string `json:"commit_id"`

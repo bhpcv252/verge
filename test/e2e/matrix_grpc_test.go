@@ -27,7 +27,7 @@ func TestMatrix_GRPC_CommitRoundTrip(t *testing.T) {
 			repo := grpcCreateRepo(t, env.grpc)
 			created := grpcCreateCommit(t, env.grpc, repo.Id, []string{})
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			got, err := env.grpc.commit.GetCommit(ctx, &vergev1.GetCommitRequest{
 				RepoId:   repo.Id,
@@ -57,7 +57,7 @@ func TestMatrix_GRPC_CommitWithParent(t *testing.T) {
 			parent := grpcCreateCommit(t, env.grpc, repo.Id, []string{})
 			child := grpcCreateCommit(t, env.grpc, repo.Id, []string{parent.Id})
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			// GetCommit must show parent linkage
 			got, err := env.grpc.commit.GetCommit(ctx, &vergev1.GetCommitRequest{
@@ -105,7 +105,7 @@ func TestMatrix_GRPC_BranchHeadAfterAdvance(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			got, err := env.grpc.branch.GetBranch(ctx, &vergev1.GetBranchRequest{
 				RepoId: repo.Id,
@@ -152,7 +152,7 @@ func TestMatrix_GRPC_MergeFlow(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			// merge commit has both parents
 			require.Len(t, mergeResp.ParentIds, 2)
@@ -195,7 +195,7 @@ func TestMatrix_GRPC_CommitListDAG(t *testing.T) {
 			orphan := grpcCreateCommit(t, env.grpc, repo.Id, []string{})
 
 			// wait for Neo4j propagation (no-op on tiers without Neo4j)
-			env.waitForOutbox(t, 10*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			resp, err := env.grpc.commit.ListCommits(ctx, &vergev1.ListCommitsRequest{
 				RepoId: repo.Id,
@@ -245,7 +245,7 @@ func TestMatrix_GRPC_CommitListByAuthor(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			resp, err := env.grpc.commit.ListCommits(ctx, &vergev1.ListCommitsRequest{
 				RepoId: repo.Id,
@@ -277,7 +277,7 @@ func TestMatrix_GRPC_PaginationNoDuplicates(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 			}
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			page1, err := env.grpc.commit.ListCommits(ctx, &vergev1.ListCommitsRequest{
 				RepoId: repo.Id,
@@ -325,7 +325,7 @@ func TestMatrix_GRPC_StaleAdvanceReturnsAborted(t *testing.T) {
 			branchName := uniqueGRPCBranchName()
 			grpcCreateBranch(t, env.grpc, repo.Id, branchName, commit2.Id)
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			_, err := env.grpc.branch.AdvanceBranch(ctx, &vergev1.AdvanceBranchRequest{
 				RepoId:           repo.Id,

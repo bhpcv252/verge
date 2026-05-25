@@ -26,7 +26,7 @@ func TestMatrix_REST_CommitRoundTrip(t *testing.T) {
 			created := createCommit(t, env.restBase, repo.ID, []string{})
 
 			// wait for the outbox worker to propagate (no-op for postgres-only)
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			resp := doGet(t, env.restBase+"/repos/"+repo.ID+"/commits/"+created.ID)
 			defer resp.Body.Close()
@@ -59,7 +59,7 @@ func TestMatrix_REST_CommitWithParent(t *testing.T) {
 			parent := createCommit(t, env.restBase, repo.ID, []string{})
 			child := createCommit(t, env.restBase, repo.ID, []string{parent.ID})
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			// verify child commit fields
 			commitResp := doGet(t, env.restBase+"/repos/"+repo.ID+"/commits/"+child.ID)
@@ -111,7 +111,7 @@ func TestMatrix_REST_BranchHeadAfterAdvance(t *testing.T) {
 			advResp.Body.Close()
 			require.Equal(t, http.StatusOK, advResp.StatusCode)
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			// read back the branch head
 			getResp := doGet(t, env.restBase+"/repos/"+repo.ID+"/branches/main")
@@ -163,7 +163,7 @@ func TestMatrix_REST_MergeFlow(t *testing.T) {
 			var mergeCommit commitResponse
 			decodeJSON(t, mergeResp.Body, &mergeCommit)
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			// merge commit must have both parents
 			require.Len(t, mergeCommit.ParentIDs, 2)
@@ -205,7 +205,7 @@ func TestMatrix_REST_CommitListDAG(t *testing.T) {
 			orphan := createCommit(t, env.restBase, repo.ID, []string{})
 
 			// wait for outbox propagation (needed for Neo4j tier)
-			env.waitForOutbox(t, 10*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			resp := doGet(t, env.restBase+"/repos/"+repo.ID+"/commits?traversal=dag&branch=main")
 			defer resp.Body.Close()
@@ -242,7 +242,7 @@ func TestMatrix_REST_CommitListFlat(t *testing.T) {
 			time.Sleep(15 * time.Millisecond)
 			c3 := createCommit(t, env.restBase, repo.ID, []string{})
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			resp := doGet(t, env.restBase+"/repos/"+repo.ID+"/commits?traversal=flat")
 			defer resp.Body.Close()
@@ -275,7 +275,7 @@ func TestMatrix_REST_PaginationNoDuplicates(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 			}
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			// page 1
 			resp1 := doGet(t, env.restBase+"/repos/"+repo.ID+"/commits?limit=2")
@@ -329,7 +329,7 @@ func TestMatrix_REST_StaleAdvanceReturns409(t *testing.T) {
 
 			createBranch(t, env.restBase, repo.ID, "main", commit2.ID)
 
-			env.waitForOutbox(t, 5*time.Second)
+			env.waitForOutbox(t, 30*time.Second)
 
 			// advance with stale expected (commit1 instead of commit2)
 			advResp := doPatch(

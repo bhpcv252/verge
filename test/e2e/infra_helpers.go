@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -296,14 +297,89 @@ func pollRedisKey(
 	timeout time.Duration,
 ) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		val, err := rdb.Get(context.Background(), key).Result()
-		if err == nil && val != "" {
-			return val
+	var val string
+	require.Eventually(t, func() bool {
+		var err error
+		val, err = rdb.Get(context.Background(), key).Result()
+		return err == nil && val != ""
+	}, timeout, 100*time.Millisecond, "timed out waiting for Redis key %q to be populated", key)
+	return val
+}
+
+func assertRedisKeyEquals(
+	t *testing.T,
+	rdb *redis.Client,
+	key string,
+	expectedCommitID string,
+	timeout time.Duration,
+) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		raw, err := rdb.Get(context.Background(), key).Result()
+		if err != nil {
+			return false
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for Redis key %q to be populated", key)
-	return ""
+		var stored struct {
+			CommitID string `json:"commit_id"`
+		}
+		if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+			return false
+		}
+		return stored.CommitID == expectedCommitID
+	}, timeout, 100*time.Millisecond, "Redis key %q did not match expected commit %q", key, expectedCommitID)
+}
+
+func assertNeo4jNodeCount(
+	t *testing.T,
+	driver neo4j.DriverWithContext,
+	repoID, commitID string,
+	expectedCount int,
+	timeout time.Duration,
+) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return neo4jCountNodes(t, driver, repoID, commitID) == expectedCount
+	}, timeout, 100*time.Millisecond, "Neo4j node count for commit %q did not reach %d", commitID, expectedCount)
+}
+
+func assertNeo4jEdgeCount(
+	t *testing.T,
+	driver neo4j.DriverWithContext,
+	repoID, commitID string,
+	expectedCount int,
+	timeout time.Duration,
+) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return neo4jCountEdges(t, driver, repoID, commitID) == expectedCount
+	}, timeout, 100*time.Millisecond, "Neo4j edge count for commit %q did not reach %d", commitID, expectedCount)
+}
+
+func assertNeo4jParentIDs(
+	t *testing.T,
+	driver neo4j.DriverWithContext,
+	repoID, commitID string,
+	expectedParents []string,
+	timeout time.Duration,
+) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		parentIDs := neo4jParentIDs(t, driver, repoID, commitID)
+		if len(parentIDs) != len(expectedParents) {
+			return false
+		}
+		for _, expected := range expectedParents {
+			found := false
+			for _, actual := range parentIDs {
+				if actual == expected {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	}, timeout, 100*time.Millisecond, "Neo4j parent IDs for commit %q did not match expected %v", commitID, expectedParents)
 }

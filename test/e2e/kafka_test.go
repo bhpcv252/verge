@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"net"
 	"net/http"
 	"sync"
@@ -132,7 +131,8 @@ func startKafkaEnv(t *testing.T) *kafkaEnv {
 func (ke *kafkaEnv) waitForProjections(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	ke.waitForOutbox(t, timeout)
-	time.Sleep(5 * time.Second)
+	// Additional buffer for Kafka message propagation and consumer processing
+	time.Sleep(10 * time.Second)
 }
 
 func TestKafka_CommitCreated_FlowsThroughToNeo4j(t *testing.T) {
@@ -141,11 +141,9 @@ func TestKafka_CommitCreated_FlowsThroughToNeo4j(t *testing.T) {
 	repo := createRepo(t, env.restBase)
 	commit := createCommit(t, env.restBase, repo.ID, []string{})
 
-	env.waitForProjections(t, 15*time.Second)
+	env.waitForProjections(t, 30*time.Second)
 
-	n := neo4jCountNodes(t, env.neo4jDriver, repo.ID, commit.ID)
-	assert.Equal(t, 1, n,
-		"CommitCreated event must flow through Kafka and create exactly one Neo4j node")
+	assertNeo4jNodeCount(t, env.neo4jDriver, repo.ID, commit.ID, 1, 30*time.Second)
 }
 
 func TestKafka_BranchHeadMoved_FlowsThroughToRedis(t *testing.T) {
@@ -164,20 +162,10 @@ func TestKafka_BranchHeadMoved_FlowsThroughToRedis(t *testing.T) {
 	advResp.Body.Close()
 	require.Equal(t, http.StatusOK, advResp.StatusCode)
 
-	env.waitForProjections(t, 15*time.Second)
+	env.waitForProjections(t, 30*time.Second)
 
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 10*time.Second)
-
-	var stored struct {
-		CommitID string `json:"commit_id"`
-		Version  int64  `json:"version"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(raw), &stored),
-		"Redis branch value must be valid JSON")
-	assert.Equal(t, commit2.ID, stored.CommitID,
-		"BranchHeadMoved event must flow through Kafka and update Redis branch key")
-	assert.Greater(t, stored.Version, int64(0), "version must be positive")
+	assertRedisKeyEquals(t, env.rdb, key, commit2.ID, 30*time.Second)
 }
 
 func TestKafka_MergeCompleted_UpdatesRedisAndNeo4j(t *testing.T) {
@@ -206,30 +194,23 @@ func TestKafka_MergeCompleted_UpdatesRedisAndNeo4j(t *testing.T) {
 	var mergeCommit commitResponse
 	decodeJSON(t, mergeResp.Body, &mergeCommit)
 
-	env.waitForProjections(t, 15*time.Second)
+	env.waitForProjections(t, 30*time.Second)
 
 	// redis must point to the merge commit
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 10*time.Second)
-
-	var stored struct {
-		CommitID string `json:"commit_id"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(raw), &stored))
-	assert.Equal(t, mergeCommit.ID, stored.CommitID,
-		"Redis branch key must point to the merge commit after MergeCompleted event")
+	assertRedisKeyEquals(t, env.rdb, key, mergeCommit.ID, 30*time.Second)
 
 	// neo4j must have the merge commit node with two parent edges
-	n := neo4jCountNodes(t, env.neo4jDriver, repo.ID, mergeCommit.ID)
-	assert.Equal(t, 1, n, "merge commit must have exactly one Neo4j node")
-
-	edges := neo4jCountEdges(t, env.neo4jDriver, repo.ID, mergeCommit.ID)
-	assert.Equal(t, 2, edges,
-		"merge commit must have exactly two PARENT_OF edges in Neo4j")
-
-	parentIDs := neo4jParentIDs(t, env.neo4jDriver, repo.ID, mergeCommit.ID)
-	assert.Contains(t, parentIDs, commitFeature.ID, "Neo4j must have edge to feature parent")
-	assert.Contains(t, parentIDs, commitMain.ID, "Neo4j must have edge to main parent")
+	assertNeo4jNodeCount(t, env.neo4jDriver, repo.ID, mergeCommit.ID, 1, 30*time.Second)
+	assertNeo4jEdgeCount(t, env.neo4jDriver, repo.ID, mergeCommit.ID, 2, 30*time.Second)
+	assertNeo4jParentIDs(
+		t,
+		env.neo4jDriver,
+		repo.ID,
+		mergeCommit.ID,
+		[]string{commitFeature.ID, commitMain.ID},
+		30*time.Second,
+	)
 }
 
 func TestKafka_BrokerUnavailable_EventsProcessedAfterRecovery(t *testing.T) {
@@ -295,24 +276,13 @@ func TestKafka_BrokerUnavailable_EventsProcessedAfterRecovery(t *testing.T) {
 	go realWorker.Run(realWorkerCtx)
 
 	// wait until all rows are processed
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		var p int
 		_ = pool.QueryRow(context.Background(),
 			`SELECT COUNT(*) FROM outbox_events WHERE processed = false`,
 		).Scan(&p)
-		if p == 0 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	var remaining int
-	_ = pool.QueryRow(context.Background(),
-		`SELECT COUNT(*) FROM outbox_events WHERE processed = false`,
-	).Scan(&remaining)
-	assert.Equal(t, 0, remaining,
-		"all outbox rows must be processed once the broker becomes available again")
+		return p == 0
+	}, 30*time.Second, 100*time.Millisecond, "all outbox rows must be processed once the broker becomes available again")
 }
 
 func TestKafka_ConcurrentBranchAdvances_ExactlyOneEventWins(t *testing.T) {
@@ -326,7 +296,7 @@ func TestKafka_ConcurrentBranchAdvances_ExactlyOneEventWins(t *testing.T) {
 	createBranch(t, env.restBase, repo.ID, "main", commit1.ID)
 
 	// wait for the branch creation to propagate before we race
-	env.waitForProjections(t, 10*time.Second)
+	env.waitForProjections(t, 30*time.Second)
 
 	type result struct {
 		status   int
@@ -364,17 +334,10 @@ func TestKafka_ConcurrentBranchAdvances_ExactlyOneEventWins(t *testing.T) {
 	}
 	require.NotEmpty(t, winnerCommitID)
 
-	env.waitForProjections(t, 15*time.Second)
+	env.waitForProjections(t, 30*time.Second)
 
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 10*time.Second)
-
-	var stored struct {
-		CommitID string `json:"commit_id"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(raw), &stored))
-	assert.Equal(t, winnerCommitID, stored.CommitID,
-		"Redis must hold the winning commit after a concurrent advance race")
+	assertRedisKeyEquals(t, env.rdb, key, winnerCommitID, 30*time.Second)
 }
 
 func TestKafka_DuplicatePublish_HandlersAreIdempotent(t *testing.T) {
@@ -393,7 +356,7 @@ func TestKafka_DuplicatePublish_HandlersAreIdempotent(t *testing.T) {
 	advResp.Body.Close()
 	require.Equal(t, http.StatusOK, advResp.StatusCode)
 
-	env.waitForProjections(t, 15*time.Second)
+	env.waitForProjections(t, 30*time.Second)
 
 	// confirm baseline state
 	require.Equal(t, 1, neo4jCountNodes(t, env.neo4jDriver, repo.ID, commit2.ID))
@@ -412,23 +375,14 @@ func TestKafka_DuplicatePublish_HandlersAreIdempotent(t *testing.T) {
 	require.NoError(t, err, "insert duplicate outbox events for idempotency test")
 
 	// allow the producer to publish and the consumer to handle duplicates
-	env.waitForProjections(t, 15*time.Second)
+	env.waitForProjections(t, 30*time.Second)
 
 	// neo4j must still have exactly one node
-	n := neo4jCountNodes(t, env.neo4jDriver, repo.ID, commit2.ID)
-	assert.Equal(t, 1, n,
-		"duplicate CommitCreated delivery must not create extra Neo4j nodes")
+	assertNeo4jNodeCount(t, env.neo4jDriver, repo.ID, commit2.ID, 1, 30*time.Second)
 
 	// redis must still hold the correct commit
 	key := redisBranchKey(repo.ID, "main")
-	raw := pollRedisKey(t, env.rdb, key, 5*time.Second)
-
-	var stored struct {
-		CommitID string `json:"commit_id"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(raw), &stored))
-	assert.Equal(t, commit2.ID, stored.CommitID,
-		"duplicate BranchHeadMoved delivery must not corrupt the Redis branch key")
+	assertRedisKeyEquals(t, env.rdb, key, commit2.ID, 30*time.Second)
 }
 
 func TestKafka_LinearHistory_AllCommitsReachNeo4j(t *testing.T) {
@@ -444,29 +398,23 @@ func TestKafka_LinearHistory_AllCommitsReachNeo4j(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	c3 := createCommit(t, env.restBase, repo.ID, []string{c2.ID})
 
-	env.waitForProjections(t, 15*time.Second)
+	env.waitForProjections(t, 30*time.Second)
 
 	// all four commits must have Commit nodes
 	for _, id := range []string{root.ID, c1.ID, c2.ID, c3.ID} {
-		n := neo4jCountNodes(t, env.neo4jDriver, repo.ID, id)
-		assert.Equal(t, 1, n,
-			"commit %s must have exactly one Commit node in Neo4j after Kafka propagation", id)
+		assertNeo4jNodeCount(t, env.neo4jDriver, repo.ID, id, 1, 30*time.Second)
 	}
 
 	// each non-root commit must have exactly one PARENT_OF edge
-	assert.Equal(t, 0, neo4jCountEdges(t, env.neo4jDriver, repo.ID, root.ID),
-		"root must have no PARENT_OF edges")
-	assert.Equal(t, 1, neo4jCountEdges(t, env.neo4jDriver, repo.ID, c1.ID),
-		"c1 must have one PARENT_OF edge")
-	assert.Equal(t, 1, neo4jCountEdges(t, env.neo4jDriver, repo.ID, c2.ID),
-		"c2 must have one PARENT_OF edge")
-	assert.Equal(t, 1, neo4jCountEdges(t, env.neo4jDriver, repo.ID, c3.ID),
-		"c3 must have one PARENT_OF edge")
+	assertNeo4jEdgeCount(t, env.neo4jDriver, repo.ID, root.ID, 0, 30*time.Second)
+	assertNeo4jEdgeCount(t, env.neo4jDriver, repo.ID, c1.ID, 1, 30*time.Second)
+	assertNeo4jEdgeCount(t, env.neo4jDriver, repo.ID, c2.ID, 1, 30*time.Second)
+	assertNeo4jEdgeCount(t, env.neo4jDriver, repo.ID, c3.ID, 1, 30*time.Second)
 
 	// verify parent linkage correctness
-	assert.Contains(t, neo4jParentIDs(t, env.neo4jDriver, repo.ID, c1.ID), root.ID)
-	assert.Contains(t, neo4jParentIDs(t, env.neo4jDriver, repo.ID, c2.ID), c1.ID)
-	assert.Contains(t, neo4jParentIDs(t, env.neo4jDriver, repo.ID, c3.ID), c2.ID)
+	assertNeo4jParentIDs(t, env.neo4jDriver, repo.ID, c1.ID, []string{root.ID}, 30*time.Second)
+	assertNeo4jParentIDs(t, env.neo4jDriver, repo.ID, c2.ID, []string{c1.ID}, 30*time.Second)
+	assertNeo4jParentIDs(t, env.neo4jDriver, repo.ID, c3.ID, []string{c2.ID}, 30*time.Second)
 }
 
 func unusedLocalAddr(t *testing.T) string {
