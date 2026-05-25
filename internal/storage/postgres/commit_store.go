@@ -25,22 +25,20 @@ func NewCommitStore(db *pgxpool.Pool) *CommitStore {
 
 type ListCommitsFilter struct {
 	RepoID    string
-	Branch    string     // filter by branch
-	Author    string     // filter by author
-	Since     *time.Time // ISO 8601 timestamp
-	Until     *time.Time // ISO 8601 timestamp
-	Traversal string     // "flat" | "dag"
+	Branch    string
+	Author    string
+	Since     *time.Time
+	Until     *time.Time
+	Traversal string // "flat" | "dag"
 	Limit     int
 	Cursor    string
 }
 
 type ListCommitsPage struct {
 	Commits    []*domain.Commit
-	NextCursor string // empty string - no more pages
+	NextCursor string
 }
 
-// create inserts a commit, its parent relationships,
-// and an outbox event in a single transaction
 func (s *CommitStore) Create(
 	ctx context.Context,
 	commit *domain.Commit,
@@ -50,17 +48,13 @@ func (s *CommitStore) Create(
 	if err != nil {
 		return nil, fmt.Errorf("postgres: begin transaction: %w", err)
 	}
-	defer func() {
-		_ = tx.Rollback(ctx)
-	}()
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	// serialize DataPointer to JSONB
 	dataPointerJSON, err := json.Marshal(commit.DataPointer)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: marshal data_pointer: %w", err)
 	}
 
-	// insert commit
 	var idempotencyKeyPtr *string
 	if commit.IdempotencyKey != "" {
 		idempotencyKeyPtr = &commit.IdempotencyKey
@@ -82,11 +76,9 @@ func (s *CommitStore) Create(
 		return nil, fmt.Errorf("postgres: insert commit: %w", err)
 	}
 
-	// insert commit_parents relationships
 	for _, parentID := range parentIDs {
 		_, err = tx.Exec(ctx,
-			`INSERT INTO commit_parents (commit_id, parent_id, repo_id)
-			 VALUES ($1, $2, $3)`,
+			`INSERT INTO commit_parents (commit_id, parent_id, repo_id) VALUES ($1, $2, $3)`,
 			commit.ID, parentID, commit.RepoID,
 		)
 		if err != nil {
@@ -94,25 +86,15 @@ func (s *CommitStore) Create(
 		}
 	}
 
-	// write outbox event
-	eventPayload := map[string]interface{}{
+	if err := txInsertOutboxEvent(ctx, tx, "CommitCreated", map[string]interface{}{
 		"commit_id":  commit.ID,
 		"repo_id":    commit.RepoID,
 		"parent_ids": parentIDs,
+		"author":     commit.Author,
+		"message":    commit.Message,
 		"timestamp":  commit.Timestamp.Format(time.RFC3339),
-	}
-	eventPayloadJSON, err := json.Marshal(eventPayload)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: marshal outbox payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (id, event_type, payload, created_at, processed)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		"evt_"+uuid.New().String(), "commit.created", eventPayloadJSON, time.Now().UTC(), false,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: insert outbox event: %w", err)
+	}); err != nil {
+		return nil, fmt.Errorf("postgres: insert CommitCreated event: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -136,12 +118,8 @@ func (s *CommitStore) GetByID(
 	commit := &domain.Commit{}
 	var dataPointerJSON []byte
 	err := row.Scan(
-		&commit.ID,
-		&commit.RepoID,
-		&commit.Message,
-		&commit.Author,
-		&commit.Timestamp,
-		&dataPointerJSON,
+		&commit.ID, &commit.RepoID, &commit.Message,
+		&commit.Author, &commit.Timestamp, &dataPointerJSON,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -149,13 +127,11 @@ func (s *CommitStore) GetByID(
 		}
 		return nil, fmt.Errorf("postgres: get commit by id: %w", err)
 	}
-
-	// deserialize DataPointer
 	if err := json.Unmarshal(dataPointerJSON, &commit.DataPointer); err != nil {
 		return nil, fmt.Errorf("postgres: unmarshal data_pointer: %w", err)
 	}
 
-	// fetch parent IDs
+	commit.ParentIDs = []string{}
 	parentRows, err := s.db.Query(ctx,
 		`SELECT parent_id FROM commit_parents WHERE commit_id = $1 ORDER BY parent_id`,
 		commitID,
@@ -164,14 +140,12 @@ func (s *CommitStore) GetByID(
 		return nil, fmt.Errorf("postgres: query commit parents: %w", err)
 	}
 	defer parentRows.Close()
-
-	commit.ParentIDs = []string{}
 	for parentRows.Next() {
-		var parentID string
-		if err := parentRows.Scan(&parentID); err != nil {
+		var pid string
+		if err := parentRows.Scan(&pid); err != nil {
 			return nil, fmt.Errorf("postgres: scan parent_id: %w", err)
 		}
-		commit.ParentIDs = append(commit.ParentIDs, parentID)
+		commit.ParentIDs = append(commit.ParentIDs, pid)
 	}
 	if err := parentRows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: parent rows error: %w", err)
@@ -193,15 +167,10 @@ func (s *CommitStore) GetByIdempotencyKey(
 
 	commit := &domain.Commit{}
 	var dataPointerJSON []byte
-	var idempotencyKeyNullable *string
+	var ikPtr *string
 	err := row.Scan(
-		&commit.ID,
-		&commit.RepoID,
-		&commit.Message,
-		&commit.Author,
-		&commit.Timestamp,
-		&dataPointerJSON,
-		&idempotencyKeyNullable,
+		&commit.ID, &commit.RepoID, &commit.Message,
+		&commit.Author, &commit.Timestamp, &dataPointerJSON, &ikPtr,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -209,16 +178,14 @@ func (s *CommitStore) GetByIdempotencyKey(
 		}
 		return nil, fmt.Errorf("postgres: get commit by idempotency key: %w", err)
 	}
-
-	// set idempotency_key if not null
-	if idempotencyKeyNullable != nil {
-		commit.IdempotencyKey = *idempotencyKeyNullable
+	if ikPtr != nil {
+		commit.IdempotencyKey = *ikPtr
 	}
-
 	if err := json.Unmarshal(dataPointerJSON, &commit.DataPointer); err != nil {
 		return nil, fmt.Errorf("postgres: unmarshal data_pointer: %w", err)
 	}
 
+	commit.ParentIDs = []string{}
 	parentRows, err := s.db.Query(ctx,
 		`SELECT parent_id FROM commit_parents WHERE commit_id = $1 ORDER BY parent_id`,
 		commit.ID,
@@ -227,14 +194,12 @@ func (s *CommitStore) GetByIdempotencyKey(
 		return nil, fmt.Errorf("postgres: query commit parents: %w", err)
 	}
 	defer parentRows.Close()
-
-	commit.ParentIDs = []string{}
 	for parentRows.Next() {
-		var parentID string
-		if err := parentRows.Scan(&parentID); err != nil {
+		var pid string
+		if err := parentRows.Scan(&pid); err != nil {
 			return nil, fmt.Errorf("postgres: scan parent_id: %w", err)
 		}
-		commit.ParentIDs = append(commit.ParentIDs, parentID)
+		commit.ParentIDs = append(commit.ParentIDs, pid)
 	}
 
 	return commit, nil
@@ -248,7 +213,6 @@ func (s *CommitStore) ValidateParentsExist(
 	if len(parentIDs) == 0 {
 		return nil
 	}
-
 	var count int
 	err := s.db.QueryRow(ctx,
 		`SELECT COUNT(*) FROM commits WHERE repo_id = $1 AND id = ANY($2)`,
@@ -257,11 +221,9 @@ func (s *CommitStore) ValidateParentsExist(
 	if err != nil {
 		return fmt.Errorf("postgres: validate parents exist: %w", err)
 	}
-
 	if count != len(parentIDs) {
 		return domain.ErrInvalidParent
 	}
-
 	return nil
 }
 
@@ -276,11 +238,8 @@ func (s *CommitStore) List(
 	argIdx := 2
 
 	if filter.Branch != "" {
-		// WITH RECURSIVE CTE to walk the commit DAG from branch head
-		// this finds all commits that are ancestors of the specified branch
 		query = `
 			WITH RECURSIVE ancestors AS (
-				-- Base case: start with the branch head commit
 				SELECT c.id
 				FROM commits c
 				INNER JOIN branches b ON c.id = b.commit_id
@@ -290,10 +249,7 @@ func (s *CommitStore) List(
 		argIdx++
 
 		query += `
-				
 				UNION
-				
-				-- Recursive case: follow parent edges backward
 				SELECT cp.parent_id
 				FROM commit_parents cp
 				INNER JOIN ancestors a ON cp.commit_id = a.id
@@ -303,15 +259,9 @@ func (s *CommitStore) List(
 			FROM commits c
 			INNER JOIN ancestors a ON c.id = a.id
 			WHERE c.repo_id = $1`
-
-		// NOTE: when Neo4j is enabled, we should use Cypher queries for graph traversal
-		// instead of recursive CTEs, this PostgreSQL implementation is the fallback
-		// TODO: Implement Neo4j-based branch filtering when Neo4j integration is added
 	} else {
-		// simple query without branch filtering
 		query = `SELECT c.id, c.repo_id, c.message, c.author, c.timestamp, c.data_pointer
-		          FROM commits c
-		          WHERE c.repo_id = $1`
+		          FROM commits c WHERE c.repo_id = $1`
 	}
 
 	if filter.Author != "" {
@@ -319,19 +269,16 @@ func (s *CommitStore) List(
 		args = append(args, filter.Author)
 		argIdx++
 	}
-
 	if filter.Since != nil {
 		query += fmt.Sprintf(" AND c.timestamp >= $%d", argIdx)
 		args = append(args, *filter.Since)
 		argIdx++
 	}
-
 	if filter.Until != nil {
 		query += fmt.Sprintf(" AND c.timestamp <= $%d", argIdx)
 		args = append(args, *filter.Until)
 		argIdx++
 	}
-
 	if filter.Cursor != "" {
 		c, err := decodeCommitCursor(filter.Cursor)
 		if err != nil {
@@ -343,7 +290,6 @@ func (s *CommitStore) List(
 	}
 
 	query += " ORDER BY c.timestamp DESC, c.id DESC"
-
 	query += fmt.Sprintf(" LIMIT $%d", argIdx)
 	args = append(args, fetchLimit)
 
@@ -357,10 +303,10 @@ func (s *CommitStore) List(
 	for rows.Next() {
 		commit := &domain.Commit{}
 		var dataPointerJSON []byte
-		if err := rows.Scan(&commit.ID, &commit.RepoID, &commit.Message, &commit.Author, &commit.Timestamp, &dataPointerJSON); err != nil {
+		if err := rows.Scan(&commit.ID, &commit.RepoID, &commit.Message,
+			&commit.Author, &commit.Timestamp, &dataPointerJSON); err != nil {
 			return nil, fmt.Errorf("postgres: list commits scan: %w", err)
 		}
-
 		if err := json.Unmarshal(dataPointerJSON, &commit.DataPointer); err != nil {
 			return nil, fmt.Errorf("postgres: unmarshal data_pointer: %w", err)
 		}
@@ -372,18 +318,16 @@ func (s *CommitStore) List(
 		if err != nil {
 			return nil, fmt.Errorf("postgres: query commit parents: %w", err)
 		}
-
 		commit.ParentIDs = []string{}
 		for parentRows.Next() {
-			var parentID string
-			if err := parentRows.Scan(&parentID); err != nil {
+			var pid string
+			if err := parentRows.Scan(&pid); err != nil {
 				parentRows.Close()
 				return nil, fmt.Errorf("postgres: scan parent_id: %w", err)
 			}
-			commit.ParentIDs = append(commit.ParentIDs, parentID)
+			commit.ParentIDs = append(commit.ParentIDs, pid)
 		}
 		parentRows.Close()
-
 		commits = append(commits, commit)
 	}
 	if err := rows.Err(); err != nil {
@@ -397,7 +341,6 @@ func (s *CommitStore) List(
 	} else {
 		page.Commits = commits
 	}
-
 	return page, nil
 }
 
@@ -406,11 +349,10 @@ func (s *CommitStore) GetParents(
 	repoID, commitID string,
 ) ([]*domain.Commit, error) {
 	var exists bool
-	err := s.db.QueryRow(ctx,
+	if err := s.db.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM commits WHERE id = $1 AND repo_id = $2)`,
 		commitID, repoID,
-	).Scan(&exists)
-	if err != nil {
+	).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("postgres: check commit exists: %w", err)
 	}
 	if !exists {
@@ -434,10 +376,10 @@ func (s *CommitStore) GetParents(
 	for rows.Next() {
 		commit := &domain.Commit{}
 		var dataPointerJSON []byte
-		if err := rows.Scan(&commit.ID, &commit.RepoID, &commit.Message, &commit.Author, &commit.Timestamp, &dataPointerJSON); err != nil {
+		if err := rows.Scan(&commit.ID, &commit.RepoID, &commit.Message,
+			&commit.Author, &commit.Timestamp, &dataPointerJSON); err != nil {
 			return nil, fmt.Errorf("postgres: get parents scan: %w", err)
 		}
-
 		if err := json.Unmarshal(dataPointerJSON, &commit.DataPointer); err != nil {
 			return nil, fmt.Errorf("postgres: unmarshal data_pointer: %w", err)
 		}
@@ -449,18 +391,16 @@ func (s *CommitStore) GetParents(
 		if err != nil {
 			return nil, fmt.Errorf("postgres: query commit parents: %w", err)
 		}
-
 		commit.ParentIDs = []string{}
 		for parentRows.Next() {
-			var parentID string
-			if err := parentRows.Scan(&parentID); err != nil {
+			var pid string
+			if err := parentRows.Scan(&pid); err != nil {
 				parentRows.Close()
 				return nil, fmt.Errorf("postgres: scan parent_id: %w", err)
 			}
-			commit.ParentIDs = append(commit.ParentIDs, parentID)
+			commit.ParentIDs = append(commit.ParentIDs, pid)
 		}
 		parentRows.Close()
-
 		parents = append(parents, commit)
 	}
 
@@ -477,17 +417,13 @@ func (s *CommitStore) CreateMerge(
 	if err != nil {
 		return nil, fmt.Errorf("postgres: begin transaction: %w", err)
 	}
-	defer func() {
-		_ = tx.Rollback(ctx)
-	}()
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	// serialize DataPointer to JSONB
 	dataPointerJSON, err := json.Marshal(commit.DataPointer)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: marshal data_pointer: %w", err)
 	}
 
-	// insert merge commit
 	var idempotencyKeyPtr *string
 	if commit.IdempotencyKey != "" {
 		idempotencyKeyPtr = &commit.IdempotencyKey
@@ -509,11 +445,9 @@ func (s *CommitStore) CreateMerge(
 		return nil, fmt.Errorf("postgres: insert merge commit: %w", err)
 	}
 
-	// insert commit_parents relationships (should be exactly 2)
 	for _, parentID := range parentIDs {
 		_, err = tx.Exec(ctx,
-			`INSERT INTO commit_parents (commit_id, parent_id, repo_id)
-			 VALUES ($1, $2, $3)`,
+			`INSERT INTO commit_parents (commit_id, parent_id, repo_id) VALUES ($1, $2, $3)`,
 			commit.ID, parentID, commit.RepoID,
 		)
 		if err != nil {
@@ -521,28 +455,23 @@ func (s *CommitStore) CreateMerge(
 		}
 	}
 
-	// advance target branch pointer with optimistic lock
-	row := tx.QueryRow(ctx,
+	// advance target branch with optimistic lock
+	var updatedName string
+	err = tx.QueryRow(ctx,
 		`UPDATE branches
 		 SET commit_id = $1
 		 WHERE repo_id = $2 AND name = $3 AND commit_id = $4
 		 RETURNING name`,
 		commit.ID, commit.RepoID, targetBranch, expectedTargetHead,
-	)
-
-	var updatedBranchName string
-	err = row.Scan(&updatedBranchName)
+	).Scan(&updatedName)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// branch has moved since expected_target_head was read
-			// fetch the current head to return in the error
 			var currentHead string
 			checkErr := tx.QueryRow(ctx,
 				`SELECT commit_id FROM branches WHERE repo_id = $1 AND name = $2`,
 				commit.RepoID, targetBranch,
 			).Scan(&currentHead)
 			if checkErr != nil {
-				// branch might have been deleted or doesn't exist
 				return nil, fmt.Errorf("postgres: check branch head: %w", checkErr)
 			}
 			return nil, &MergeBranchConflictError{
@@ -554,27 +483,28 @@ func (s *CommitStore) CreateMerge(
 		return nil, fmt.Errorf("postgres: advance target branch: %w", err)
 	}
 
-	// write outbox event
-	eventPayload := map[string]interface{}{
-		"commit_id":     commit.ID,
-		"repo_id":       commit.RepoID,
-		"parent_ids":    parentIDs,
-		"timestamp":     commit.Timestamp.Format(time.RFC3339),
-		"is_merge":      true,
-		"target_branch": targetBranch,
-	}
-	eventPayloadJSON, err := json.Marshal(eventPayload)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: marshal merge outbox payload: %w", err)
+	now := time.Now().UTC()
+
+	// CommitCreated
+	if err := txInsertOutboxEvent(ctx, tx, "CommitCreated", map[string]interface{}{
+		"commit_id":  commit.ID,
+		"repo_id":    commit.RepoID,
+		"parent_ids": parentIDs,
+		"author":     commit.Author,
+		"message":    commit.Message,
+		"timestamp":  commit.Timestamp.Format(time.RFC3339),
+	}); err != nil {
+		return nil, fmt.Errorf("postgres: insert CommitCreated event: %w", err)
 	}
 
-	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (id, event_type, payload, created_at, processed)
-		 VALUES ($1, $2, $3, $4, $5)`,
-		"evt_"+uuid.New().String(), "commit.created", eventPayloadJSON, time.Now().UTC(), false,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: insert merge outbox event: %w", err)
+	// BranchHeadMoved
+	if err := txInsertOutboxEventAt(ctx, tx, "BranchHeadMoved", map[string]interface{}{
+		"repo_id":   commit.RepoID,
+		"branch":    targetBranch,
+		"commit_id": commit.ID,
+		"version":   now.UnixMilli(),
+	}, now); err != nil {
+		return nil, fmt.Errorf("postgres: insert BranchHeadMoved event: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -584,23 +514,45 @@ func (s *CommitStore) CreateMerge(
 	return commit, nil
 }
 
-// MergeBranchConflictError is returned when the
-// target branch has moved during a merge operation
 type MergeBranchConflictError struct {
 	BranchName   string
 	CurrentHead  string
 	ExpectedHead string
 }
 
-func (e *MergeBranchConflictError) Error() string {
-	return "merge branch conflict"
-}
-
+func (e *MergeBranchConflictError) Error() string { return "merge branch conflict" }
 func (e *MergeBranchConflictError) Is(target error) bool {
 	return target == domain.ErrStaleMergeTarget
 }
 
-// cursor encoding
+func txInsertOutboxEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	eventType string,
+	payload map[string]interface{},
+) error {
+	return txInsertOutboxEventAt(ctx, tx, eventType, payload, time.Now().UTC())
+}
+
+func txInsertOutboxEventAt(
+	ctx context.Context,
+	tx pgx.Tx,
+	eventType string,
+	payload map[string]interface{},
+	createdAt time.Time,
+) error {
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO outbox_events (id, event_type, payload, created_at, processed)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		"evt_"+uuid.New().String(), eventType, payloadJSON, createdAt, false,
+	)
+	return err
+}
+
 type commitCursor struct {
 	Timestamp time.Time `json:"ts"`
 	ID        string    `json:"id"`

@@ -18,7 +18,10 @@ import (
 	restv1 "github.com/bhpcv252/verge/internal/api/rest/v1"
 	"github.com/bhpcv252/verge/internal/config"
 	"github.com/bhpcv252/verge/internal/service"
+	"github.com/bhpcv252/verge/internal/storage/composite"
+	neo4jstore "github.com/bhpcv252/verge/internal/storage/neo4j"
 	"github.com/bhpcv252/verge/internal/storage/postgres"
+	redisstore "github.com/bhpcv252/verge/internal/storage/redis"
 )
 
 func main() {
@@ -28,32 +31,73 @@ func main() {
 }
 
 func run() error {
-	// Config
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 
-	// Database
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// PostgreSQL (always required)
 	pool, err := postgres.NewPool(ctx, cfg.Storage.Postgres.URL)
 	if err != nil {
 		return fmt.Errorf("postgres: %w", err)
 	}
 	defer pool.Close()
 
-	// Stores
+	// Base postgres stores
+	pgBranchStore := postgres.NewBranchStore(pool)
+	pgCommitStore := postgres.NewCommitStore(pool)
 	repoStore := postgres.NewRepoStore(pool)
-	branchStore := postgres.NewBranchStore(pool)
-	commitStore := postgres.NewCommitStore(pool)
+
+	// Redis (optional)
+	// when enabled, branch heads and commit objects are cached in Redis
+	var (
+		branchStore service.BranchStore = pgBranchStore
+		commitStore service.CommitStore = pgCommitStore
+	)
+
+	if cfg.Storage.Redis.Enabled {
+		rdb, err := redisstore.NewClient(ctx, cfg.Storage.Redis.URL)
+		if err != nil {
+			return fmt.Errorf("redis: %w", err)
+		}
+		defer rdb.Close()
+
+		redisBranchHead := redisstore.NewBranchHeadStore(rdb, cfg.Storage.Redis.BranchTTL)
+		redisCommitCache := redisstore.NewCommitCache(rdb)
+
+		branchStore = composite.NewBranchRouter(pgBranchStore, redisBranchHead)
+		commitStore = composite.NewCommitRouter(pgCommitStore, redisCommitCache)
+
+		log.Printf("redis: branch TTL=%s, commit cache enabled", cfg.Storage.Redis.BranchTTL)
+	}
+
+	// Neo4j (optional)
+	// when enabled, DAG traversal queries use Neo4j Cypher with postgres fallback
+	if cfg.Storage.Neo4j.Enabled {
+		driver, err := neo4jstore.NewDriver(ctx, cfg.Storage.Neo4j.URL)
+		if err != nil {
+			return fmt.Errorf("neo4j: %w", err)
+		}
+		defer driver.Close(ctx)
+
+		pgGraphStore := postgres.NewGraphStore(pool)
+		neo4jGraphStore := neo4jstore.NewGraphStore(driver)
+		_ = composite.NewGraphRouter(
+			neo4jGraphStore,
+			pgGraphStore,
+		)
+
+		log.Println("neo4j: graph projection enabled")
+	}
 
 	// Services
 	repoSvc := service.NewRepoService(repoStore)
 	commitSvc := service.NewCommitService(commitStore, repoStore)
 	branchSvc := service.NewBranchService(branchStore, repoStore, commitStore)
-	mergeSvc := service.NewMergeService(commitStore, repoStore, commitStore, branchStore)
+	mergeSvc := service.NewMergeService(pgCommitStore, repoStore, commitStore, branchStore)
 
 	g, gCtx := errgroup.WithContext(ctx)
 
@@ -118,7 +162,7 @@ func run() error {
 		})
 	}
 
-	// shutdown signal
+	// Shutdown signal
 	g.Go(func() error {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

@@ -5,8 +5,3 @@ pre-commit:
         make lint &&
         make test &&
         go fmt ./...
-
-pre-push:
-  commands:
-    integration:
-      run: make test-all

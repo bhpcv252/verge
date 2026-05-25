@@ -120,59 +120,158 @@ Test business logic that sits above storage. All storage calls are mocked with h
 
 ---
 
-### Outbox Worker Layer (`internal/outbox/`)
+### Outbox Worker (`internal/outbox/`)
 
-The outbox worker is the async component that reads unprocessed events from `outbox_events` and propagates changes to Neo4j and Redis. Its guarantees are: every event is eventually processed, processing is idempotent (running the same event twice produces the same state), and a worker failure at any point leaves the system in a recoverable state.
+The outbox worker reads unprocessed events from `outbox_events` and either dispatches them
+in-process to registered handlers, or publishes them to an external broker via an `EventBus`.
+Unit tests here use hand-rolled mocks for the database pool, handlers, and EventBus.
 
-Unit tests here use hand-rolled mocks for both the outbox store and the derived stores (Neo4j store, Redis store).
+#### Worker - in-process dispatch mode (`bus == nil`)
 
-#### Event routing
+| Scenario                                        | Expected behavior                                                                           |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Event type matches a registered handler         | Handler `Handle` called; event ID added to processed list; `processed = true` in DB         |
+| Event type has no registered handler            | `dispatch` logs and returns nil; event IS still marked processed (no-match is not an error) |
+| Handler returns an error                        | Event ID NOT added to processed list; worker logs and continues to next event               |
+| Multiple handlers registered, only one matches  | Only the matching handler's `Handle` called; other handlers not called                      |
+| Empty outbox (no unprocessed rows)              | No `UPDATE` issued; transaction committed cleanly                                           |
+| Batch of mixed events (some succeed, some fail) | Successfully dispatched events marked processed; failed ones left unprocessed for retry     |
 
-| Scenario                           | Expected behavior                                                            |
-| ---------------------------------- | ---------------------------------------------------------------------------- |
-| `commit.created` event dispatched  | Neo4j handler is called; Redis handler is not called                         |
-| `branch.advanced` event dispatched | Redis handler is called; Neo4j handler is not called                         |
-| Unknown event type                 | Event is logged and marked processed; no handler called; no error propagated |
+#### Worker - EventBus mode (`bus != nil`)
 
-#### Neo4j handler (`commit.created`)
+| Scenario                   | Expected behavior                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------ |
+| `Publish` succeeds         | All events in batch marked processed; no in-process handler is called                |
+| `Publish` returns an error | No events marked processed; transaction rolls back; in-process handlers never called |
 
-| Scenario                                                | Expected behavior                                                                             |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Regular commit (one parent)                             | `UpsertCommit` called once; `UpsertParentEdge` called once                                    |
-| Root commit (zero parents)                              | `UpsertCommit` called once; `UpsertParentEdge` never called                                   |
-| Merge commit (two parents, `is_merge: true` in payload) | `UpsertCommit` called once; `UpsertParentEdge` called twice                                   |
-| `UpsertCommit` fails                                    | Event not marked processed; will be retried on next worker run                                |
-| `UpsertParentEdge` fails after `UpsertCommit` succeeded | Event not marked processed; on retry, `UpsertCommit` runs again (idempotent via MERGE)        |
-| Same event processed twice                              | Second run calls `UpsertCommit` and `UpsertParentEdge` again; state is identical (idempotent) |
+#### `RedisHealHandler` (`internal/outbox/redis_handler.go`)
 
-#### Redis handler (`branch.advanced`)
+Handles `BranchHeadMoved` events by calling `SetHead` on the `BranchHeadStore` with the
+version from the payload. This is a heal pattern: it writes the current head into Redis
+rather than invalidating it.
 
-| Scenario                                         | Expected behavior                                                       |
-| ------------------------------------------------ | ----------------------------------------------------------------------- |
-| Cache key exists and is stale                    | `InvalidateBranchHead` called; key deleted                              |
-| Cache key does not exist                         | `InvalidateBranchHead` called; no error (DEL on missing key is a no-op) |
-| `InvalidateBranchHead` fails (Redis unavailable) | Event not marked processed; will be retried; does not crash the worker  |
-| Same `branch.advanced` event processed twice     | Second `InvalidateBranchHead` call is a no-op; state is correct         |
+| Scenario                                | Expected behavior                                                       |
+| --------------------------------------- | ----------------------------------------------------------------------- |
+| `EventTypes()`                          | Returns exactly `["BranchHeadMoved"]`                                   |
+| Valid `BranchHeadMoved` payload         | `SetHead` called with correct `repoID`, `branch`, `commitID`, `version` |
+| Malformed JSON payload                  | Returns error; `SetHead` never called                                   |
+| `SetHead` returns error                 | Error propagated to worker; event not marked processed                  |
+| Same event processed twice (idempotent) | Second `SetHead` call is a no-op if version guard is in place in Redis  |
 
-#### Mark processed
+#### `Neo4jHandler` (`internal/outbox/neo4j_handler.go`)
 
-| Scenario                     | Expected behavior                                                                         |
-| ---------------------------- | ----------------------------------------------------------------------------------------- |
-| Handler succeeds             | `MarkProcessed` called with the event ID                                                  |
-| Handler returns error        | `MarkProcessed` not called; event remains unprocessed for retry                           |
-| `MarkProcessed` itself fails | Error is logged; event will be re-processed on next run (idempotent handlers absorb this) |
+Handles `CommitCreated` events by upserting commit nodes and `PARENT_OF` edges in Neo4j.
+Full driver behavior is tested in integration. Unit tests focus on parsing and routing.
+
+| Scenario                      | Expected behavior                                            |
+| ----------------------------- | ------------------------------------------------------------ |
+| `EventTypes()`                | Returns exactly `["CommitCreated"]`                          |
+| Malformed JSON payload        | Returns error without calling the Neo4j driver               |
+| Valid payload with no parents | Driver called once for node upsert; no edge upsert attempted |
+
+---
+
+### Composite Routers (`internal/storage/composite/`)
+
+Routers implement read-from-fast-store / write-through / fallback logic. All dependencies
+are mocked with hand-rolled mocks implementing the relevant interfaces.
+
+#### `BranchRouter`
+
+| Scenario                                                        | Expected behavior                                                                         |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `GetHead` - Redis hit                                           | Returns value from Redis; `pg.GetByName` never called                                     |
+| `GetHead` - Redis miss (`ErrCacheMiss`)                         | Falls back to `pg.GetByName`; calls `redis.SetHead` to warm cache; returns postgres value |
+| `GetHead` - Redis error (not `ErrCacheMiss`)                    | Logs error; falls back to `pg.GetByName`; calls `redis.SetHead`; returns postgres value   |
+| `GetHead` - Redis error, then postgres error                    | Returns postgres error to caller                                                          |
+| `GetHead` - Redis miss, `SetHead` fails after postgres fallback | `SetHead` failure is non-fatal; postgres value still returned to caller                   |
+| `Advance` - postgres succeeds                                   | Returns updated branch; calls `redis.SetHead` to sync cache (non-fatal if it fails)       |
+| `Advance` - postgres fails (conflict or not found)              | Returns postgres error; `redis.SetHead` never called                                      |
+| `Advance` - postgres succeeds, `redis.SetHead` fails            | Branch returned successfully; Redis failure is logged and swallowed                       |
+| `Create`, `GetByName`, `List`, `Delete`                         | Delegate directly to postgres; Redis never called                                         |
+
+#### `CommitRouter`
+
+| Scenario                                                                      | Expected behavior                                                                       |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `GetByID` - cache hit                                                         | Returns cached commit; `pg.GetByID` never called                                        |
+| `GetByID` - cache miss (`ErrCacheMiss`)                                       | Falls back to `pg.GetByID`; calls `cache.SetCommit` to populate cache; returns pg value |
+| `GetByID` - cache error (not `ErrCacheMiss`)                                  | Logs error; falls back to `pg.GetByID`; calls `cache.SetCommit`; returns pg value       |
+| `GetByID` - cache miss, `SetCommit` fails after postgres fallback             | `SetCommit` failure is non-fatal; postgres value still returned                         |
+| `GetByID` - cache miss, postgres returns not-found                            | Returns postgres not-found error; `SetCommit` never called                              |
+| `Create`, `GetByIdempotencyKey`, `List`, `GetParents`, `ValidateParentsExist` | Delegate directly to postgres; cache never called                                       |
+
+#### `GraphRouter`
+
+| Scenario                         | Expected behavior                                                 |
+| -------------------------------- | ----------------------------------------------------------------- |
+| `TraverseDAG` - Neo4j succeeds   | Returns Neo4j result; `pg.TraverseDAG` never called               |
+| `TraverseDAG` - Neo4j errors     | Logs error; falls back to `pg.TraverseDAG` and returns its result |
+| `GetAncestors` - Neo4j succeeds  | Returns Neo4j result; `pg.GetAncestors` never called              |
+| `GetAncestors` - Neo4j errors    | Falls back to postgres                                            |
+| `FindMergeBase` - Neo4j succeeds | Returns Neo4j result; `pg.FindMergeBase` never called             |
+| `FindMergeBase` - Neo4j errors   | Falls back to postgres                                            |
+
+---
+
+### Kafka EventBus (`internal/outbox/eventbus/kafka/`)
+
+Unit tests focus on message serialisation and consumer dispatch logic. Tests that require
+a real Kafka broker are integration tests (build tag: `integration`).
+
+#### `message.go` - serialisation round-trip
+
+| Scenario                              | Expected behavior                                                |
+| ------------------------------------- | ---------------------------------------------------------------- |
+| `toKafkaMessage` → `fromKafkaMessage` | All fields (`ID`, `EventType`, `Payload`, `CreatedAt`) preserved |
+
+#### `Consumer.dispatch`
+
+| Scenario                                | Expected behavior                    |
+| --------------------------------------- | ------------------------------------ |
+| Event type matches a registered handler | Handler `Handle` called              |
+| Event type has no registered handler    | No handler called; no error returned |
+
+#### `Consumer.Run` (unit, with mock reader)
+
+| Scenario                        | Expected behavior                                                         |
+| ------------------------------- | ------------------------------------------------------------------------- |
+| Malformed JSON message received | Message skipped and offset committed; consumer continues without crashing |
 
 ---
 
 ### Config Layer (`internal/config/`)
 
-| Scenario                                     | Expected behavior                                    |
-| -------------------------------------------- | ---------------------------------------------------- |
-| Minimal valid config (only postgres DSN set) | Parses without error; Redis disabled; Neo4j disabled |
-| Redis enabled flag set                       | `RedisEnabled = true`                                |
-| Neo4j enabled flag set                       | `Neo4jEnabled = true`                                |
-| Invalid log level                            | Returns parse error                                  |
-| Missing PostgreSQL DSN                       | Returns parse error (required field)                 |
+| Group    | Scenario                                                         | Expected behavior                                                                                                                                                             |
+| -------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Defaults | Only `VERGE_STORAGE_POSTGRES_URL` set                            | All other fields take documented default values                                                                                                                               |
+| Server   | Both HTTP and GRPC disabled                                      | Returns validation error                                                                                                                                                      |
+| Server   | Only HTTP enabled / only GRPC enabled                            | Loads without error                                                                                                                                                           |
+| Server   | HTTP or GRPC port = 0 or 65535                                   | Returns validation error (`gt=0,lt=65535`)                                                                                                                                    |
+| Server   | HTTP or GRPC port = 1 or 65534                                   | Loads without error (boundary check)                                                                                                                                          |
+| Postgres | URL missing                                                      | Returns validation error (`required`)                                                                                                                                         |
+| Postgres | URL not a valid URL                                              | Returns validation error (`url`)                                                                                                                                              |
+| Redis    | Enabled = true, URL set                                          | Loads without error                                                                                                                                                           |
+| Redis    | Enabled = true, URL empty                                        | Returns validation error (`required-if-enabled`)                                                                                                                              |
+| Redis    | Enabled = true, URL invalid                                      | Returns validation error (`url`)                                                                                                                                              |
+| Redis    | Enabled = false, URL empty or present                            | Loads without error                                                                                                                                                           |
+| Redis    | `BRANCH_TTL` set to `"2m"`                                       | `BranchTTL` parsed as `2 * time.Minute`                                                                                                                                       |
+| Redis    | `BRANCH_TTL` set to invalid string                               | Returns parse error                                                                                                                                                           |
+| Neo4j    | Enabled = true, URL set                                          | Loads without error                                                                                                                                                           |
+| Neo4j    | Enabled = true, URL empty                                        | Returns validation error (`required-if-enabled`)                                                                                                                              |
+| Neo4j    | Enabled = true, URL invalid                                      | Returns validation error (`url`)                                                                                                                                              |
+| Neo4j    | Enabled = false, URL empty or present                            | Loads without error                                                                                                                                                           |
+| Outbox   | `POLL_INTERVAL` = `"1s"`                                         | `PollInterval` parsed as `time.Second`                                                                                                                                        |
+| Outbox   | `POLL_INTERVAL` = invalid string                                 | Returns parse error                                                                                                                                                           |
+| Outbox   | `BATCH_SIZE` = `"50"`                                            | `BatchSize` parsed as `50`                                                                                                                                                    |
+| Outbox   | `BATCH_SIZE` = non-integer string                                | Returns parse error                                                                                                                                                           |
+| EventBus | Enabled = true, Type = `"kafka"` / `"rabbitmq"` / `"sqs"` / etc. | Loads without error (any non-empty type is valid)                                                                                                                             |
+| EventBus | Enabled = true, Type = `""`                                      | Returns validation error (`required-if-enabled`). Tested via `validate()` directly because `envDefault:"kafka"` prevents an empty string reaching validation through `Load()` |
+| EventBus | Enabled = false, Type = anything including `""`                  | Loads without error (type is irrelevant when disabled)                                                                                                                        |
+| Kafka    | Custom brokers and topic set                                     | Fields parsed correctly                                                                                                                                                       |
+| Registry | `VERGE_` env var present that is not in `knownVergeKeys`         | Test fails, forcing the dev to register the new var                                                                                                                           |
+
+---
 
 ### REST Handlers (`internal/api/rest/v1/`)
 
@@ -197,157 +296,128 @@ The handler test only verifies that the HTTP response has the right status code 
 
 #### BranchHandler
 
-| Scenario                                                                            | What to assert                  |
-| ----------------------------------------------------------------------------------- | ------------------------------- |
-| `POST /repos/:id/branches` - valid                                                  | 201, branch fields correct      |
-| `POST /repos/:id/branches` - service returns `repo_not_found`                       | 404                             |
-| `POST /repos/:id/branches` - service returns `commit_not_found`                     | 404                             |
-| `POST /repos/:id/branches` - service returns `branch_already_exists`                | 409                             |
-| `PATCH /repos/:id/branches/:name` - valid                                           | 200                             |
-| `PATCH /repos/:id/branches/:name` - missing `expected_commit_id` in body            | 400                             |
-| `PATCH /repos/:id/branches/:name` - service returns `branch_conflict`               | 409 with `current_head` in body |
-| `DELETE /repos/:id/branches/:name` - valid                                          | 204, empty body                 |
-| `DELETE /repos/:id/branches/:name` - service returns `cannot_delete_default_branch` | 409                             |
-| `DELETE /repos/:id/branches/:name` - service returns `branch_not_found`             | 404                             |
-| `GET /repos/:id/branches` - valid                                                   | 200                             |
+| Scenario                                                                            | What to assert              |
+| ----------------------------------------------------------------------------------- | --------------------------- |
+| `POST /repos/:id/branches` - valid                                                  | 201, branch fields correct  |
+| `POST /repos/:id/branches` - service returns `repo_not_found`                       | 404                         |
+| `POST /repos/:id/branches` - service returns `commit_not_found`                     | 404                         |
+| `POST /repos/:id/branches` - service returns `branch_already_exists`                | 409                         |
+| `PATCH /repos/:id/branches/:name` - valid advance                                   | 200, `commit_id` updated    |
+| `PATCH /repos/:id/branches/:name` - missing `expected_commit_id`                    | 400                         |
+| `PATCH /repos/:id/branches/:name` - service returns `branch_conflict`               | 409, `current_head` in body |
+| `DELETE /repos/:id/branches/:name` - valid                                          | 204                         |
+| `DELETE /repos/:id/branches/:name` - service returns `branch_not_found`             | 404                         |
+| `DELETE /repos/:id/branches/:name` - service returns `cannot_delete_default_branch` | 409                         |
+| `GET /repos/:id/branches` - no params                                               | 200, first page             |
 
 #### CommitHandler
 
-| Scenario                                                                  | What to assert                              |
-| ------------------------------------------------------------------------- | ------------------------------------------- |
-| `POST /repos/:id/commits` - valid                                         | 201                                         |
-| `POST /repos/:id/commits` - service returns existing (idempotency hit)    | 200, not 201                                |
-| `POST /repos/:id/commits` - missing required fields                       | 400                                         |
-| `POST /repos/:id/commits` - service returns `invalid_parent`              | 422                                         |
-| `POST /repos/:id/commits` - service returns `branch_conflict`             | 409 with `current_head` in body             |
-| `GET /repos/:id/commits/:commit_id` - valid                               | 200 with full commit including data_pointer |
-| `GET /repos/:id/commits/:commit_id` - service returns `commit_not_found`  | 404                                         |
-| `GET /repos/:id/commits` - valid flat traversal                           | 200                                         |
-| `GET /repos/:id/commits` - dag without branch param                       | 400                                         |
-| `GET /repos/:id/commits` - invalid limit param                            | 400                                         |
-| `GET /repos/:id/commits/:id/parents` - valid                              | 200 with parents array                      |
-| `GET /repos/:id/commits/:id/parents` - service returns `commit_not_found` | 404                                         |
+| Scenario                                                          | What to assert                  |
+| ----------------------------------------------------------------- | ------------------------------- |
+| `POST /repos/:id/commits` - valid (root commit)                   | 201, `parent_ids: []`           |
+| `POST /repos/:id/commits` - valid (regular commit)                | 201, `parent_ids` has one entry |
+| `POST /repos/:id/commits` - two parent_ids in body                | 400, `error: "invalid_request"` |
+| `POST /repos/:id/commits` - service returns `repo_not_found`      | 404                             |
+| `POST /repos/:id/commits` - service returns `invalid_parent`      | 422                             |
+| `POST /repos/:id/commits` - idempotency key repeat                | 200 (not 201)                   |
+| `GET /repos/:id/commits/:id` - service returns commit             | 200, full commit shape          |
+| `GET /repos/:id/commits/:id` - service returns `commit_not_found` | 404                             |
+| `GET /repos/:id/commits` - `traversal=dag` without `branch` param | 400, `error: "invalid_request"` |
+| `GET /repos/:id/commits/:id/parents` - root commit                | 200, `parents: []`              |
 
 #### MergeHandler
 
-| Scenario                                                        | What to assert                  |
-| --------------------------------------------------------------- | ------------------------------- |
-| `POST /repos/:id/merges` - valid                                | 201                             |
-| `POST /repos/:id/merges` - missing required fields              | 400                             |
-| `POST /repos/:id/merges` - service returns `branch_not_found`   | 404                             |
-| `POST /repos/:id/merges` - service returns `invalid_parent`     | 422                             |
-| `POST /repos/:id/merges` - service returns `stale_merge_target` | 409 with `current_head` in body |
+| Scenario                                                        | What to assert                    |
+| --------------------------------------------------------------- | --------------------------------- |
+| `POST /repos/:id/merges` - valid                                | 201, two `parent_ids` in response |
+| `POST /repos/:id/merges` - not exactly two parent_ids           | 400, `error: "invalid_request"`   |
+| `POST /repos/:id/merges` - service returns `branch_not_found`   | 404                               |
+| `POST /repos/:id/merges` - service returns `invalid_parent`     | 422                               |
+| `POST /repos/:id/merges` - service returns `stale_merge_target` | 409, `current_head` in body       |
 
 ---
 
 ## Integration Tests
 
-**Location:** co-located with the storage and service packages as `*_test.go`, using the `//go:build integration` build tag.
+**Build tag:** `//go:build integration`
 
-**Runtime:** Requires Docker. testcontainers-go spins up real PostgreSQL, Redis, and Neo4j containers. Migrations are applied via `golang-migrate` using the embedded SQL files in `internal/testhelper/`. Each storage package manages its own container. Run with `go test -tags integration ./...` or `make test-integration`.
+**Runtime:** each test spins up a real container via `testcontainers-go`. Use the helpers in `testhelper/` for Postgres. Add equivalent helpers for Redis and Neo4j containers as new stores are tested.
 
 ---
 
-### PostgreSQL Storage (`internal/storage/postgres/`)
+### Postgres Storage (`internal/storage/postgres/`)
 
-Each test gets a clean schema via a fresh container. Tests share a container within a package but each test isolates its data by using unique repo/commit IDs.
+#### `BranchStore`
 
-#### RepoStore
+Existing tests cover `Create`, `GetByName`, `List`, and `Delete`. The following tests must be added or updated for `Advance`:
 
-| Scenario                   | What to assert                                                    |
-| -------------------------- | ----------------------------------------------------------------- |
-| `Insert` - new repo        | Row exists in DB with correct fields                              |
-| `GetByID` - exists         | Returns correct struct                                            |
-| `GetByID` - not found      | Returns typed not-found error                                     |
-| `List` - empty table       | Returns empty slice, null cursor                                  |
-| `List` - multiple repos    | Returns in consistent order, cursor works across pages            |
-| `List` - cursor pagination | Second page starts where first page ended, no duplicates, no gaps |
-
-#### BranchStore
-
-| Scenario                                    | What to assert                               |
-| ------------------------------------------- | -------------------------------------------- |
-| `Insert` - new branch                       | Row exists with correct commit_id            |
-| `Insert` - duplicate name in same repo      | Error maps to `branch_already_exists`        |
-| `Insert` - duplicate name in different repo | Succeeds (names are scoped to repo)          |
-| `AdvanceHead` - correct expected_commit_id  | Updates row, returns new head                |
-| `AdvanceHead` - wrong expected_commit_id    | Returns 0 rows, store returns conflict error |
-| `AdvanceHead` - branch not found            | Returns not-found error                      |
-| `Delete` - branch exists                    | Row removed                                  |
-| `Delete` - branch not found                 | Returns not-found error                      |
-| `GetHead` - exists                          | Returns commit_id                            |
-| `GetHead` - not found                       | Returns not-found error                      |
-| `List` with pagination                      | Cursor works correctly                       |
-
-#### CommitStore
-
-| Scenario                                 | What to assert                                                                                      |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `Insert` - root commit                   | Commit row inserted, zero rows in `commit_parents`                                                  |
-| `Insert` - regular commit                | Commit row + one `commit_parents` row                                                               |
-| `Insert` - with outbox event             | Commit row + outbox row inserted in same transaction; if transaction rolls back, neither row exists |
-| `Insert` - idempotency key collision     | Returns existing commit, no duplicate inserted                                                      |
-| `Insert` - parent_id from different repo | Returns `invalid_parent` error                                                                      |
-| `GetByID` - exists                       | Returns full commit with DataPointer                                                                |
-| `GetByID` - cross-repo lookup            | Returns not-found (repo_id scoped)                                                                  |
-| `ListFlat` - empty repo                  | Returns empty slice                                                                                 |
-| `ListFlat` - author filter               | Returns only matching commits                                                                       |
-| `ListFlat` - since/until filter          | Returns only commits in range                                                                       |
-| `ListDAG` - from head                    | Returns commits in reverse-chronological order following parent links                               |
-| `ListDAG` - merge commit in history      | Both parent branches appear in traversal                                                            |
-| `GetParents` - root commit               | Returns empty slice                                                                                 |
-| `GetParents` - regular commit            | Returns one parent                                                                                  |
-| `GetParents` - merge commit              | Returns two parents                                                                                 |
-
-#### MergeStore
-
-| Scenario                   | What to assert                                                                                                                      |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `CreateMerge` - valid      | Commit row, two `commit_parents` rows, branch `commit_id` updated, outbox event written - all in one transaction                    |
-| `CreateMerge` - lock fails | Simulated by advancing the branch between validation and the UPDATE; whole transaction rolls back; commit row and outbox row absent |
-
-#### OutboxStore
-
-| Scenario            | What to assert                                        |
-| ------------------- | ----------------------------------------------------- |
-| `Fetch unprocessed` | Returns only rows where `processed = false`           |
-| `MarkProcessed`     | Sets `processed = true`, idempotent when called twice |
+| Scenario                                             | What to assert                                                                                                                                                                      |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Advance` - success                                  | Branch `commit_id` updated in DB                                                                                                                                                    |
+| `Advance` - success: outbox event written atomically | An `outbox_events` row exists with `event_type = "BranchHeadMoved"`, `processed = false`, and payload containing correct `repo_id`, `branch`, `commit_id`, and a non-zero `version` |
+| `Advance` - conflict: outbox event NOT written       | When `Advance` returns `branch_conflict`, no new `outbox_events` row is written                                                                                                     |
+| `Advance` - outbox INSERT fails mid-transaction      | Branch `commit_id` is NOT updated (entire transaction rolled back)                                                                                                                  |
+| `Advance` - stale `expected_commit_id`               | Returns `branch_conflict` with correct `CurrentHead`                                                                                                                                |
+| `Advance` - branch not found                         | Returns `branch_not_found`                                                                                                                                                          |
 
 ---
 
 ### Redis Storage (`internal/storage/redis/`)
 
-Tests run against a real Redis container.
+Tests run against a real Redis container (testcontainers).
 
-| Scenario                                   | What to assert                                                        |
-| ------------------------------------------ | --------------------------------------------------------------------- |
-| `SetBranchHead`                            | Key exists in Redis with correct value and TTL set                    |
-| `GetBranchHead` - cache hit                | Returns commit_id                                                     |
-| `GetBranchHead` - cache miss               | Returns miss signal (nil), no error                                   |
-| `InvalidateBranchHead` - key exists        | Key deleted; subsequent `GetBranchHead` returns miss                  |
-| `InvalidateBranchHead` - key doesn't exist | No error returned (idempotent)                                        |
-| `GetBranchHead` - Redis unreachable        | Returns miss signal; does not panic or propagate a fatal error        |
-| Set then advance then get                  | After `SetBranchHead`, `InvalidateBranchHead`, `GetBranchHead` → miss |
+#### `BranchHeadStore` (`GetHead` / `SetHead`)
+
+| Scenario                                          | What to assert                                                                   |
+| ------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `SetHead` → `GetHead`                             | Returns the correct `commitID`                                                   |
+| `GetHead` on a key that was never set             | Returns `interfaces.ErrCacheMiss`                                                |
+| `SetHead` with higher version after lower version | `GetHead` returns the newer `commitID` (higher version wins)                     |
+| `SetHead` with lower version after higher version | `GetHead` still returns the previously written `commitID` (stale write rejected) |
+| `SetHead` twice with same version                 | Second write accepted (idempotent); value unchanged                              |
+| TTL applied: key expires after `BranchTTL`        | After TTL elapses, `GetHead` returns `ErrCacheMiss`                              |
+
+#### `CommitCache` (`GetCommit` / `SetCommit`)
+
+| Scenario                                       | What to assert                                                       |
+| ---------------------------------------------- | -------------------------------------------------------------------- |
+| `SetCommit` → `GetCommit`                      | Returns correct commit with all fields preserved                     |
+| `GetCommit` on a key that was never set        | Returns `interfaces.ErrCacheMiss`                                    |
+| Key written with corrupted JSON (manual `SET`) | `GetCommit` returns `ErrCacheMiss` (corrupted entry treated as miss) |
+| No TTL on commit entries                       | Key persists beyond any reasonable test duration                     |
 
 ---
 
 ### Neo4j Storage (`internal/storage/neo4j/`)
 
-Tests run against a real Neo4j container.
+Tests run against a real Neo4j container (testcontainers). Each test creates its own isolated
+repo ID so that graphs do not bleed across test cases.
 
-| Scenario                                               | What to assert                                                                  |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| `UpsertCommit` - new commit                            | Node exists in graph with correct `id` and `repo_id` properties                 |
-| `UpsertCommit` - same commit twice                     | Exactly one node exists (MERGE is idempotent)                                   |
-| `UpsertParentEdge` - new edge                          | `PARENT_OF` relationship exists between child and parent nodes                  |
-| `UpsertParentEdge` - same edge twice                   | Exactly one relationship exists (idempotent)                                    |
-| `UpsertParentEdge` - merge commit (two calls)          | Two distinct `PARENT_OF` relationships from child to each parent                |
-| `ListAncestors` - linear chain (A → B → C, start at A) | Returns B then C in order                                                       |
-| `ListAncestors` - root commit (no parents)             | Returns empty slice                                                             |
-| `ListAncestors` - merge commit in history              | Both parent branches are traversed; all ancestors from both sides appear        |
-| `ListAncestors` - pagination (limit=2 on chain of 5)   | First page returns 2 nodes and a cursor; second page returns remaining nodes    |
-| `ListAncestors` - commit not in graph                  | Returns not-found error                                                         |
-| Node committed to wrong repo                           | `ListAncestors` scoped to `repo_id` does not return nodes from a different repo |
+#### `Neo4jHandler` - commit node and edge upserts
+
+| Scenario                                              | What to assert                                                                |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `Handle` - root commit (zero parents)                 | Commit node exists in graph; no `PARENT_OF` edge created                      |
+| `Handle` - regular commit (one parent)                | Commit node exists; one `PARENT_OF` edge from child to parent                 |
+| `Handle` - merge commit (two parents)                 | Commit node exists; two `PARENT_OF` edges, one to each parent                 |
+| `Handle` - same `CommitCreated` event processed twice | Exactly one commit node and the correct number of edges (MERGE is idempotent) |
+| `Handle` - parent node did not exist yet              | Parent stub node created; properties filled when parent's own event arrives   |
+
+#### `GraphStore` - DAG traversal queries
+
+| Scenario                                                | What to assert                                                                       |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `TraverseDAG` - linear chain from head                  | Returns commits in `timestamp DESC` order; all commits in chain present              |
+| `TraverseDAG` - with `Author` filter                    | Only commits by that author returned                                                 |
+| `TraverseDAG` - with `Since` / `Until` filters          | Only commits within the time range returned                                          |
+| `TraverseDAG` - pagination: `limit=2` on chain of 5     | First call returns 2 commits and a non-empty cursor; second call returns remaining 3 |
+| `TraverseDAG` - empty `Head` param                      | Returns error                                                                        |
+| `GetAncestors` - linear chain (start at A, parents B→C) | Returns B and C; A itself is excluded                                                |
+| `GetAncestors` - root commit (no parents)               | Returns empty slice, no error                                                        |
+| `GetAncestors` - merge commit in history                | Ancestors from both parent branches appear in result                                 |
+| `FindMergeBase` - two branches with common ancestor     | Returns the correct LCA commit                                                       |
+| `FindMergeBase` - no common ancestor                    | Returns error                                                                        |
+| Repo isolation                                          | Queries scoped to `repo_id` never return nodes belonging to a different repo         |
 
 ---
 
@@ -355,14 +425,30 @@ Tests run against a real Neo4j container.
 
 These test the service layer wired to a real PostgreSQL store (no mocks). They catch bugs at the boundary between business logic and SQL that mocks cannot surface.
 
-| Scenario                                                                | What to assert                                                                     |
-| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Create commit → advance branch                                          | Branch head reflects new commit ID in DB                                           |
-| Concurrent branch advancement (two goroutines, same expected_commit_id) | Exactly one succeeds; the other gets `branch_conflict` with correct `current_head` |
-| Merge → check branch head and parent rows                               | `main` points to merge commit; `commit_parents` has two rows for merge commit      |
-| Idempotent commit retry                                                 | Two calls with same `idempotency_key` produce one DB row, both return same commit  |
-| Outbox event written with commit                                        | After `CreateCommit`, outbox row exists and `processed = false`                    |
-| Outbox rollback on commit failure                                       | If commit insert fails mid-transaction, outbox row is also absent                  |
+| Scenario                                                                | What to assert                                                                                            |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Create commit → advance branch                                          | Branch head reflects new commit ID in DB                                                                  |
+| Concurrent branch advancement (two goroutines, same expected_commit_id) | Exactly one succeeds; the other gets `branch_conflict` with correct `current_head`                        |
+| Merge → check branch head and parent rows                               | `main` points to merge commit; `commit_parents` has two rows for merge commit                             |
+| Idempotent commit retry                                                 | Two calls with same `idempotency_key` produce one DB row, both return same commit                         |
+| Outbox event written with commit                                        | After `CreateCommit`, an `outbox_events` row exists with `processed = false`                              |
+| Outbox rollback on commit failure                                       | If commit insert fails mid-transaction, outbox row is also absent                                         |
+| Outbox event written with `AdvanceBranch`                               | After `AdvanceBranch`, a `BranchHeadMoved` outbox row exists with `processed = false` and correct payload |
+
+---
+
+### Outbox Worker Integration (`internal/outbox/`)
+
+Tests run against a real PostgreSQL container (testcontainers). The worker is run directly by calling `poll()` once rather than starting the ticker loop.
+
+| Scenario                                                      | What to assert                                                       |
+| ------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Unprocessed events present, handler succeeds                  | After `poll`, rows have `processed = true` and `processed_at` is set |
+| Handler returns error                                         | Row remains `processed = false`; available for retry on next poll    |
+| Two workers polling simultaneously (`FOR UPDATE SKIP LOCKED`) | Each event processed exactly once across both workers                |
+| EventBus mode: mock bus `Publish` succeeds                    | All events in batch marked processed; bus received all events        |
+| EventBus mode: mock bus `Publish` fails                       | No events marked processed; transaction rolled back                  |
+| Empty outbox                                                  | `poll` returns nil; no UPDATE statement executed                     |
 
 ---
 
@@ -472,11 +558,14 @@ These tests replicate the scenarios in `INTERNAL_FLOW.md` end-to-end. Each test 
 func TestCreateCommit_IdempotencyKeyMatch(t *testing.T)
 func TestAdvanceBranch_StaleExpectedCommitID(t *testing.T)
 func TestMerge_ExactlyTwoParentsRequired(t *testing.T)
+func TestBranchRouter_GetHead_CacheMiss_FallsBackToPostgres(t *testing.T)
+func TestRedisHealHandler_ValidPayload_CallsSetHead(t *testing.T)
+func TestWorker_HandlerError_EventNotMarkedProcessed(t *testing.T)
 ```
 
 **Subtests:** Use `t.Run` when a single setup is shared across multiple assertion variants. Do not nest more than one level deep.
 
-**Table-driven tests:** Use when multiple cases share identical setup and differ only in their input values. A good example is validating all `data_pointer.type` enum values.
+**Table-driven tests:** Use when multiple cases share identical setup and differ only in their input values. A good example is validating all `data_pointer.type` enum values or all `EventBus.Type` strings that must be accepted.
 
 ---
 
@@ -505,13 +594,16 @@ var testDataPointer = domain.DataPointer{
 
 These are minimums, not ceilings.
 
-| Layer                        | Target                                                                             |
-| ---------------------------- | ---------------------------------------------------------------------------------- |
-| `internal/domain/`           | All                                                                                |
-| `internal/service/`          | All happy paths and every named error code                                         |
-| `internal/storage/postgres/` | Every store method, all error returns                                              |
-| `internal/storage/redis/`    | Every store method, cache hit/miss/unavailable paths                               |
-| `internal/storage/neo4j/`    | Every store method, idempotency on replay, pagination                              |
-| `internal/api/rest/v1/`      | All handlers, focus on error mapping                                               |
-| `internal/outbox/`           | All event types, all handler outcomes, idempotency on double-processing            |
-| `test/e2e/`                  | Not measured by line coverage, measured by flow coverage (see Full Flow E2E above) |
+| Layer                             | Target                                                                                       |
+| --------------------------------- | -------------------------------------------------------------------------------------------- |
+| `internal/domain/`                | All                                                                                          |
+| `internal/config/`                | All fields: defaults, validation rules, every env var in `knownVergeKeys`                    |
+| `internal/service/`               | All happy paths and every named error code                                                   |
+| `internal/storage/postgres/`      | Every store method; all error returns; outbox event written atomically with `Advance`        |
+| `internal/storage/redis/`         | `GetHead`/`SetHead` hit/miss/version-guard; `GetCommit`/`SetCommit` hit/miss/corrupted       |
+| `internal/storage/neo4j/`         | Handler upsert idempotency; all three `GraphStore` query methods; pagination; repo isolation |
+| `internal/storage/composite/`     | All fallback paths for each router; non-fatal cache/Redis failures swallowed correctly       |
+| `internal/outbox/`                | All event types; both dispatch modes (in-process and EventBus); handler error handling       |
+| `internal/outbox/eventbus/kafka/` | Message round-trip; consumer dispatch; malformed message handling                            |
+| `internal/api/rest/v1/`           | All handlers; focus on error mapping                                                         |
+| `test/e2e/`                       | Not measured by line coverage; measured by flow coverage (see Full Flow E2E above)           |

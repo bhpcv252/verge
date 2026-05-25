@@ -9,11 +9,21 @@ services:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U verge"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   neo4j:
     image: neo4j:5
@@ -22,32 +32,90 @@ services:
     ports:
       - "7687:7687"
       - "7474:7474"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "cypher-shell -u neo4j -p changeme 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092"
+      KAFKA_LISTENERS: "PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "kafka-broker-api-versions --bootstrap-server kafka:29092 || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   server:
     build:
       context: .
       dockerfile: deployments/docker/Dockerfile
     depends_on:
-      - postgres
-      - redis
-      - neo4j
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     ports:
       - "8080:8080"
       - "9090:9090"
       - "8081:8081"
+    env_file:
+      - .env
     environment:
-      VERGE_POSTGRES_HOST: postgres
-      VERGE_REDIS_ADDR: redis:6379
-      VERGE_NEO4J_URI: bolt://neo4j:7687
+      # Override .env with docker-compose network values
+      VERGE_STORAGE_POSTGRES_URL: postgres://verge:changeme@postgres:5432/verge?sslmode=disable
+      VERGE_STORAGE_REDIS_URL: redis://redis:6379
+      VERGE_STORAGE_NEO4J_URL: bolt://neo4j:changeme@neo4j:7687
+      VERGE_KAFKA_BROKERS: kafka:29092
 
   worker:
     build:
       context: .
       dockerfile: deployments/docker/Dockerfile.worker
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    env_file:
+      - .env
     environment:
-      VERGE_POSTGRES_HOST: postgres
+      # override .env with docker-compose network values
+      VERGE_STORAGE_POSTGRES_URL: postgres://verge:changeme@postgres:5432/verge?sslmode=disable
+      VERGE_STORAGE_REDIS_URL: redis://redis:6379
+      VERGE_STORAGE_NEO4J_URL: bolt://neo4j:changeme@neo4j:7687
+      VERGE_KAFKA_BROKERS: kafka:29092
 
   tools:
     build:
@@ -59,3 +127,5 @@ services:
 
 volumes:
   pg_data:
+  neo4j_data:
+  kafka_data:

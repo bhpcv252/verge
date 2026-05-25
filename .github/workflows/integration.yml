@@ -6,7 +6,8 @@ on:
   pull_request:
 
 jobs:
-  integration-and-e2e:
+  integration:
+    name: Integration Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -21,20 +22,53 @@ jobs:
       - name: Verify Docker
         run: docker version
 
-      - name: Run integration and e2e tests with coverage
+      - name: Run integration tests
         run: |
           go test -v \
-            -tags=integration,e2e \
+            -tags=integration \
             -covermode=atomic \
             -coverprofile=coverage-integration.txt \
             ./...
 
-      - name: Upload integration coverage to Codecov
+      - name: Upload integration coverage
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage-integration.txt
           flags: integration
-          name: integration-e2e
+          name: integration
           fail_ci_if_error: true
-          verbose: true
+
+  e2e-outbox:
+    name: E2E & Outbox Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Verify Docker
+        run: docker version
+
+      - name: Run e2e and outbox tests
+        run: |
+          go test -v \
+            -tags=e2e,outbox \
+            -timeout=30m \
+            -covermode=atomic \
+            -coverprofile=coverage-e2e-outbox.txt \
+            ./...
+
+      - name: Upload e2e/outbox coverage
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage-e2e-outbox.txt
+          flags: e2e,outbox
+          name: e2e-outbox
+          fail_ci_if_error: true
