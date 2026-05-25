@@ -4,9 +4,11 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -44,6 +46,50 @@ func createTestCommit(
 	_, err := commitStore.Create(context.Background(), commit, parentIDs)
 	require.NoError(t, err)
 	return commit
+}
+
+type outboxRow struct {
+	id          string
+	eventType   string
+	payload     map[string]interface{}
+	processed   bool
+	processedAt *time.Time
+}
+
+func fetchOutboxRows(t *testing.T, pool *pgxpool.Pool, eventType string) []outboxRow {
+	t.Helper()
+	rows, err := pool.Query(context.Background(),
+		`SELECT id, event_type, payload, processed, processed_at
+		 FROM outbox_events
+		 WHERE event_type = $1
+		 ORDER BY created_at ASC`,
+		eventType,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var result []outboxRow
+	for rows.Next() {
+		var r outboxRow
+		var rawPayload []byte
+		require.NoError(
+			t,
+			rows.Scan(&r.id, &r.eventType, &rawPayload, &r.processed, &r.processedAt),
+		)
+		require.NoError(t, json.Unmarshal(rawPayload, &r.payload))
+		result = append(result, r)
+	}
+	require.NoError(t, rows.Err())
+	return result
+}
+
+func countOutboxRows(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM outbox_events`,
+	).Scan(&n))
+	return n
 }
 
 // Insert
@@ -246,6 +292,149 @@ func TestBranchStore_Advance_BranchNotFound_ReturnsBranchNotFound(t *testing.T) 
 
 	_, err := store.Advance(context.Background(), repo.ID, "nonexistent", commit.ID, "commit_old")
 	assert.ErrorIs(t, err, domain.ErrBranchNotFound)
+}
+
+func TestBranchStore_Advance_WritesOutboxEvent(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	branchStore := NewBranchStore(pool)
+	repoStore := NewRepoStore(pool)
+	commitStore := NewCommitStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	commit1 := createTestCommit(t, commitStore, repo.ID, []string{})
+	commit2 := createTestCommit(t, commitStore, repo.ID, []string{commit1.ID})
+
+	branch := testhelper.NewTestBranch(repo.ID, commit1.ID)
+	require.NoError(t, branchStore.Create(context.Background(), branch))
+
+	_, err := branchStore.Advance(
+		context.Background(),
+		repo.ID,
+		branch.Name,
+		commit2.ID,
+		commit1.ID,
+	)
+	require.NoError(t, err)
+
+	evts := fetchOutboxRows(t, pool, "BranchHeadMoved")
+	require.Len(t, evts, 1)
+	evt := evts[0]
+
+	assert.False(t, evt.processed, "outbox event must start unprocessed")
+	assert.Nil(t, evt.processedAt)
+}
+
+func TestBranchStore_Advance_OutboxPayloadContainsCorrectFields(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	branchStore := NewBranchStore(pool)
+	repoStore := NewRepoStore(pool)
+	commitStore := NewCommitStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	commit1 := createTestCommit(t, commitStore, repo.ID, []string{})
+	commit2 := createTestCommit(t, commitStore, repo.ID, []string{commit1.ID})
+
+	branch := testhelper.NewTestBranch(repo.ID, commit1.ID)
+	require.NoError(t, branchStore.Create(context.Background(), branch))
+
+	_, err := branchStore.Advance(
+		context.Background(),
+		repo.ID,
+		branch.Name,
+		commit2.ID,
+		commit1.ID,
+	)
+	require.NoError(t, err)
+
+	evts := fetchOutboxRows(t, pool, "BranchHeadMoved")
+	require.Len(t, evts, 1)
+	p := evts[0].payload
+
+	assert.Equal(t, repo.ID, p["repo_id"])
+	assert.Equal(t, branch.Name, p["branch"])
+	assert.Equal(t, commit2.ID, p["commit_id"])
+	assert.NotNil(t, p["version"], "version must be set (unix millis)")
+
+	version, ok := p["version"].(float64) // JSON numbers unmarshal as float64
+	require.True(t, ok)
+	assert.Greater(t, version, float64(0))
+}
+
+func TestBranchStore_Advance_OutboxEventWrittenOnlyOnce(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	branchStore := NewBranchStore(pool)
+	repoStore := NewRepoStore(pool)
+	commitStore := NewCommitStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	c1 := createTestCommit(t, commitStore, repo.ID, []string{})
+	c2 := createTestCommit(t, commitStore, repo.ID, []string{c1.ID})
+
+	branch := testhelper.NewTestBranch(repo.ID, c1.ID)
+	require.NoError(t, branchStore.Create(context.Background(), branch))
+
+	_, err := branchStore.Advance(context.Background(), repo.ID, branch.Name, c2.ID, c1.ID)
+	require.NoError(t, err)
+
+	evts := fetchOutboxRows(t, pool, "BranchHeadMoved")
+	assert.Equal(t, 1, len(evts), "exactly one BranchHeadMoved event must be written")
+}
+
+func TestBranchStore_Advance_OnConflict_NoOutboxEventWritten(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	branchStore := NewBranchStore(pool)
+	repoStore := NewRepoStore(pool)
+	commitStore := NewCommitStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	c1 := createTestCommit(t, commitStore, repo.ID, []string{})
+	c2 := createTestCommit(t, commitStore, repo.ID, []string{c1.ID})
+	c3 := createTestCommit(t, commitStore, repo.ID, []string{c2.ID})
+
+	branch := testhelper.NewTestBranch(repo.ID, c2.ID)
+	require.NoError(t, branchStore.Create(context.Background(), branch))
+
+	// advance with stale expected (c1 instead of c2) - must fail with conflict
+	_, err := branchStore.Advance(context.Background(), repo.ID, branch.Name, c3.ID, c1.ID)
+	require.Error(t, err, "expected branch conflict error")
+
+	evts := fetchOutboxRows(t, pool, "BranchHeadMoved")
+	assert.Equal(t, 0, len(evts),
+		"no BranchHeadMoved event must be written when Advance fails due to a conflict")
+}
+
+func TestBranchStore_Advance_BranchUpdateAndOutboxEventAreAtomic(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	branchStore := NewBranchStore(pool)
+	repoStore := NewRepoStore(pool)
+	commitStore := NewCommitStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	c1 := createTestCommit(t, commitStore, repo.ID, []string{})
+	c2 := createTestCommit(t, commitStore, repo.ID, []string{c1.ID})
+
+	branch := testhelper.NewTestBranch(repo.ID, c1.ID)
+	require.NoError(t, branchStore.Create(context.Background(), branch))
+
+	updated, err := branchStore.Advance(context.Background(), repo.ID, branch.Name, c2.ID, c1.ID)
+	require.NoError(t, err)
+
+	// both the branch update and the outbox event must be visible in the same DB state
+	assert.Equal(t, c2.ID, updated.CommitID, "branch must point to new commit")
+
+	evts := fetchOutboxRows(t, pool, "BranchHeadMoved")
+	require.Len(t, evts, 1, "outbox event must exist alongside the branch update")
+	assert.Equal(t, c2.ID, evts[0].payload["commit_id"])
 }
 
 // Delete

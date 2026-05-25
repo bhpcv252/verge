@@ -4,10 +4,12 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,6 +25,39 @@ func setupCommitStoreTest(t *testing.T) (*CommitStore, *RepoStore, func()) {
 	repoStore := NewRepoStore(pool)
 
 	return commitStore, repoStore, cleanup
+}
+
+func fetchOutboxByType(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	eventType string,
+) []map[string]interface{} {
+	t.Helper()
+	rows, err := pool.Query(context.Background(),
+		`SELECT payload FROM outbox_events WHERE event_type = $1 ORDER BY created_at ASC`,
+		eventType,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var raw []byte
+		require.NoError(t, rows.Scan(&raw))
+		var p map[string]interface{}
+		require.NoError(t, json.Unmarshal(raw, &p))
+		result = append(result, p)
+	}
+	require.NoError(t, rows.Err())
+	return result
+}
+
+func totalOutboxCount(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM outbox_events`).Scan(&n))
+	return n
 }
 
 // Insert
@@ -148,6 +183,115 @@ func TestCommitStore_Create_InvalidParentID_FKViolation(t *testing.T) {
 	_, err := store.Create(context.Background(), commit, []string{"commit_nonexistent"})
 	require.Error(t, err, "should fail on invalid parent_id FK")
 	assert.Contains(t, err.Error(), "violates foreign key constraint")
+}
+
+func TestCommitStore_Create_WritesCommitCreatedOutboxEvent(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	store := NewCommitStore(pool)
+	repoStore := NewRepoStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	commit := testhelper.NewTestCommit(repo.ID, []string{})
+
+	_, err := store.Create(context.Background(), commit, []string{})
+	require.NoError(t, err)
+
+	evts := fetchOutboxByType(t, pool, "CommitCreated")
+	require.Len(t, evts, 1)
+}
+
+func TestCommitStore_Create_CommitCreatedPayloadContainsCorrectFields(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	store := NewCommitStore(pool)
+	repoStore := NewRepoStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	parent := testhelper.NewTestCommit(repo.ID, []string{})
+	_, err := store.Create(context.Background(), parent, []string{})
+	require.NoError(t, err)
+
+	commit := testhelper.NewTestCommit(repo.ID, []string{parent.ID})
+	commit.Author = "verge@test.com"
+	commit.Message = "payload field check"
+
+	_, err = store.Create(context.Background(), commit, []string{parent.ID})
+	require.NoError(t, err)
+
+	evts := fetchOutboxByType(t, pool, "CommitCreated")
+	require.GreaterOrEqual(t, len(evts), 1)
+	p := evts[len(evts)-1]
+
+	assert.Equal(t, commit.ID, p["commit_id"])
+	assert.Equal(t, repo.ID, p["repo_id"])
+	assert.Equal(t, commit.Author, p["author"])
+	assert.Equal(t, commit.Message, p["message"])
+
+	parentIDs, ok := p["parent_ids"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, parentIDs, 1)
+	assert.Equal(t, parent.ID, parentIDs[0])
+}
+
+func TestCommitStore_Create_RootCommit_CommitCreatedHasEmptyParentIDs(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	store := NewCommitStore(pool)
+	repoStore := NewRepoStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	commit := testhelper.NewTestCommit(repo.ID, []string{})
+
+	_, err := store.Create(context.Background(), commit, []string{})
+	require.NoError(t, err)
+
+	evts := fetchOutboxByType(t, pool, "CommitCreated")
+	require.Len(t, evts, 1)
+
+	parentIDs, ok := evts[0]["parent_ids"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, parentIDs, "root commit must have empty parent_ids in outbox payload")
+}
+
+func TestCommitStore_Create_OutboxEventStartsUnprocessed(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	store := NewCommitStore(pool)
+	repoStore := NewRepoStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	commit := testhelper.NewTestCommit(repo.ID, []string{})
+
+	_, err := store.Create(context.Background(), commit, []string{})
+	require.NoError(t, err)
+
+	var processed bool
+	var processedAt *time.Time
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT processed, processed_at FROM outbox_events WHERE event_type='CommitCreated'`,
+	).Scan(&processed, &processedAt))
+
+	assert.False(t, processed)
+	assert.Nil(t, processedAt)
+}
+
+func TestCommitStore_Create_FailedInsert_NoOutboxEventWritten(t *testing.T) {
+	pool, cleanup := testhelper.SetupPostgres(t)
+	defer cleanup()
+
+	store := NewCommitStore(pool)
+
+	commit := testhelper.NewTestCommit("repo-does-not-exist", []string{})
+	_, err := store.Create(context.Background(), commit, []string{})
+	require.Error(t, err)
+
+	assert.Equal(t, 0, totalOutboxCount(t, pool),
+		"no outbox event must exist when the commit insert fails")
 }
 
 // Get
@@ -622,4 +766,130 @@ func TestCommitStore_GetParents_CommitNotFound_ReturnsError(t *testing.T) {
 
 	_, err := store.GetParents(context.Background(), repo.ID, "commit_nonexistent")
 	assert.ErrorIs(t, err, domain.ErrCommitNotFound)
+}
+
+func setupMergeTest(
+	t *testing.T,
+) (*pgxpool.Pool, *CommitStore, *BranchStore, *domain.Repo, *domain.Commit, *domain.Branch) {
+	t.Helper()
+	pool, cleanup := testhelper.SetupPostgres(t)
+	t.Cleanup(cleanup)
+
+	store := NewCommitStore(pool)
+	branchStore := NewBranchStore(pool)
+	repoStore := NewRepoStore(pool)
+
+	repo := createTestRepo(t, repoStore)
+	base := createTestCommit(t, store, repo.ID, []string{})
+
+	branch := &domain.Branch{
+		Name:      "main",
+		RepoID:    repo.ID,
+		CommitID:  base.ID,
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, branchStore.Create(context.Background(), branch))
+
+	return pool, store, branchStore, repo, base, branch
+}
+
+func TestCommitStore_CreateMerge_WritesCommitCreatedOutboxEvent(t *testing.T) {
+	pool, store, _, repo, base, branch := setupMergeTest(t)
+
+	sourceCommit := createTestCommit(t, store, repo.ID, []string{base.ID})
+	mergeCommit := testhelper.NewTestCommit(repo.ID, []string{sourceCommit.ID, base.ID})
+
+	_, err := store.CreateMerge(
+		context.Background(),
+		mergeCommit,
+		[]string{sourceCommit.ID, base.ID},
+		branch.Name,
+		branch.CommitID,
+	)
+	require.NoError(t, err)
+
+	evts := fetchOutboxByType(t, pool, "CommitCreated")
+	require.GreaterOrEqual(t, len(evts), 1)
+
+	last := evts[len(evts)-1]
+	assert.Equal(t, mergeCommit.ID, last["commit_id"])
+
+	parentIDs, ok := last["parent_ids"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, parentIDs, 2, "merge commit must have two parent IDs in outbox payload")
+}
+
+func TestCommitStore_CreateMerge_WritesBranchHeadMovedOutboxEvent(t *testing.T) {
+	pool, store, _, repo, base, branch := setupMergeTest(t)
+
+	sourceCommit := createTestCommit(t, store, repo.ID, []string{base.ID})
+	mergeCommit := testhelper.NewTestCommit(repo.ID, []string{sourceCommit.ID, base.ID})
+
+	_, err := store.CreateMerge(
+		context.Background(),
+		mergeCommit,
+		[]string{sourceCommit.ID, base.ID},
+		branch.Name,
+		branch.CommitID,
+	)
+	require.NoError(t, err)
+
+	evts := fetchOutboxByType(t, pool, "BranchHeadMoved")
+	require.Len(t, evts, 1)
+
+	p := evts[0]
+	assert.Equal(t, repo.ID, p["repo_id"])
+	assert.Equal(t, branch.Name, p["branch"])
+	assert.Equal(t, mergeCommit.ID, p["commit_id"])
+	assert.NotNil(t, p["version"])
+}
+
+func TestCommitStore_CreateMerge_BothOutboxEventsStartUnprocessed(t *testing.T) {
+	pool, store, _, repo, base, branch := setupMergeTest(t)
+
+	sourceCommit := createTestCommit(t, store, repo.ID, []string{base.ID})
+	mergeCommit := testhelper.NewTestCommit(repo.ID, []string{sourceCommit.ID, base.ID})
+
+	_, err := store.CreateMerge(
+		context.Background(),
+		mergeCommit,
+		[]string{sourceCommit.ID, base.ID},
+		branch.Name,
+		branch.CommitID,
+	)
+	require.NoError(t, err)
+
+	var count int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM outbox_events WHERE processed = false`).Scan(&count))
+
+	// 1 CommitCreated from sourceCommit, 1 CommitCreated + 1 BranchHeadMoved from CreateMerge
+	assert.GreaterOrEqual(t, count, 2)
+}
+
+func TestCommitStore_CreateMerge_StaleMergeTarget_NoOutboxEventsWritten(t *testing.T) {
+	pool, store, _, repo, base, branch := setupMergeTest(t)
+
+	sourceCommit := createTestCommit(t, store, repo.ID, []string{base.ID})
+	mergeCommit := testhelper.NewTestCommit(repo.ID, []string{sourceCommit.ID, base.ID})
+
+	// use wrong expected head to trigger stale merge target
+	_, err := store.CreateMerge(
+		context.Background(),
+		mergeCommit,
+		[]string{sourceCommit.ID, base.ID},
+		branch.Name,
+		"commit-wrong-expected-head",
+	)
+	require.Error(t, err)
+
+	// only the CommitCreated from sourceCommit.Create should exist
+	evts := fetchOutboxByType(t, pool, "BranchHeadMoved")
+	assert.Empty(t, evts, "no BranchHeadMoved event must be written when merge fails")
+
+	mergeCreated := fetchOutboxByType(t, pool, "CommitCreated")
+	for _, p := range mergeCreated {
+		assert.NotEqual(t, mergeCommit.ID, p["commit_id"],
+			"CommitCreated for the merge commit must not appear when CreateMerge fails")
+	}
 }

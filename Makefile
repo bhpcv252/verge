@@ -1,4 +1,4 @@
-.PHONY: up down build proto proto-check migrate-up migrate-down lint test test-all
+.PHONY: up down build proto proto-check migrate-up migrate-down lint test test-integration test-e2e test-e2e-outbox test-all
 
 up:
 	docker compose up --build
@@ -28,5 +28,14 @@ lint:
 test:
 	go test ./...
 
+test-integration:
+	go test -tags integration ./...
+
+test-e2e:
+	go test -tags e2e ./...
+
+test-e2e-outbox:
+	go test -tags e2e,outbox ./... -timeout 30m
+
 test-all:
-	go test -tags integration,e2e ./...
+	go test -tags integration,e2e,outbox ./... -timeout 30m

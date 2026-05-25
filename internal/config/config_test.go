@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sets multiple environment variables and returns a cleanup function
@@ -14,51 +15,56 @@ func setEnv(t *testing.T, pairs map[string]string) {
 	}
 }
 
-// Exhaustive list of all VERGE_ variables recognized by this service.
-// If you add a new env var to config.go, add it here as well with a test case.
+// exhaustive list of all VERGE_ variables recognized by this service
+// if you add a new env var to config.go, add it here as well with a test case
 var knownVergeKeys = map[string]struct{}{
-	"VERGE_SERVER_HTTP_ENABLED":   {},
-	"VERGE_SERVER_HTTP_PORT":      {},
-	"VERGE_SERVER_GRPC_ENABLED":   {},
-	"VERGE_SERVER_GRPC_PORT":      {},
-	"VERGE_STORAGE_POSTGRES_URL":  {},
-	"VERGE_STORAGE_REDIS_ENABLED": {},
-	"VERGE_STORAGE_REDIS_URL":     {},
+	// Server
+	"VERGE_SERVER_HTTP_ENABLED": {},
+	"VERGE_SERVER_HTTP_PORT":    {},
+	"VERGE_SERVER_GRPC_ENABLED": {},
+	"VERGE_SERVER_GRPC_PORT":    {},
+
+	"VERGE_STORAGE_POSTGRES_URL": {},
+
+	"VERGE_STORAGE_REDIS_ENABLED":    {},
+	"VERGE_STORAGE_REDIS_URL":        {},
+	"VERGE_STORAGE_REDIS_BRANCH_TTL": {},
+
 	"VERGE_STORAGE_NEO4J_ENABLED": {},
 	"VERGE_STORAGE_NEO4J_URL":     {},
+
+	"VERGE_OUTBOX_POLL_INTERVAL":    {},
+	"VERGE_OUTBOX_BATCH_SIZE":       {},
+	"VERGE_OUTBOX_EVENTBUS_ENABLED": {},
+	"VERGE_OUTBOX_EVENTBUS_TYPE":    {},
+
+	"VERGE_KAFKA_BROKERS": {},
+	"VERGE_KAFKA_TOPIC":   {},
 }
 
-// returns the minimal valid environment needed to pass all validations
+// NOTE: this uses os.Unsetenv (not t.Setenv) intentionally, we want a hard
+// reset before setting only the vars a test cares about via setEnv/t.Setenv
+func clearVergeEnv(t *testing.T) {
+	t.Helper()
+	for k := range knownVergeKeys {
+		os.Unsetenv(k)
+	}
+}
+
 func baseEnv() map[string]string {
 	return map[string]string{
-		"VERGE_SERVER_HTTP_ENABLED":   "true",
-		"VERGE_SERVER_HTTP_PORT":      "8080",
-		"VERGE_SERVER_GRPC_ENABLED":   "false",
-		"VERGE_SERVER_GRPC_PORT":      "9090",
+		// server
+		"VERGE_SERVER_HTTP_ENABLED": "true",
+		"VERGE_SERVER_HTTP_PORT":    "8080",
+		"VERGE_SERVER_GRPC_ENABLED": "false",
+		"VERGE_SERVER_GRPC_PORT":    "9090",
+
+		// storage
 		"VERGE_STORAGE_POSTGRES_URL":  "postgres://verge:changeme@postgres:5432/verge?sslmode=disable",
 		"VERGE_STORAGE_REDIS_ENABLED": "false",
 		"VERGE_STORAGE_REDIS_URL":     "",
 		"VERGE_STORAGE_NEO4J_ENABLED": "false",
 		"VERGE_STORAGE_NEO4J_URL":     "",
-	}
-}
-
-// removes all VERGE_ prefixed env vars so each test starts clean
-func clearVergeEnv(t *testing.T) {
-	t.Helper()
-	keys := []string{
-		"VERGE_SERVER_HTTP_ENABLED",
-		"VERGE_SERVER_HTTP_PORT",
-		"VERGE_SERVER_GRPC_ENABLED",
-		"VERGE_SERVER_GRPC_PORT",
-		"VERGE_STORAGE_POSTGRES_URL",
-		"VERGE_STORAGE_REDIS_ENABLED",
-		"VERGE_STORAGE_REDIS_URL",
-		"VERGE_STORAGE_NEO4J_ENABLED",
-		"VERGE_STORAGE_NEO4J_URL",
-	}
-	for _, k := range keys {
-		os.Unsetenv(k)
 	}
 }
 
@@ -70,14 +76,16 @@ func TestNoUnrecognisedVergeEnvVars(t *testing.T) {
 		}
 		if _, known := knownVergeKeys[key]; !known {
 			t.Errorf(
-				"unrecognised VERGE_ env var %q — either wire it up in config.go or remove it",
+				"unrecognised VERGE_ env var %q - either add it to config.go and knownVergeKeys, or remove it from the environment",
 				key,
 			)
 		}
 	}
 }
 
-func TestLoad_Defaults(t *testing.T) {
+// default values
+
+func TestLoad_ServerDefaults(t *testing.T) {
 	clearVergeEnv(t)
 	setEnv(t, map[string]string{
 		"VERGE_STORAGE_POSTGRES_URL": "postgres://verge:changeme@localhost:5432/verge?sslmode=disable",
@@ -89,64 +97,104 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 
 	if !cfg.Server.HTTP.Enabled {
-		t.Error("expected HTTP.Enabled default to be true")
+		t.Error("Server.HTTP.Enabled default: want true, got false")
 	}
 	if cfg.Server.HTTP.Port != 8080 {
-		t.Errorf("expected HTTP.Port default 8080, got %d", cfg.Server.HTTP.Port)
+		t.Errorf("Server.HTTP.Port default: want 8080, got %d", cfg.Server.HTTP.Port)
 	}
 	if cfg.Server.GRPC.Enabled {
-		t.Error("expected GRPC.Enabled default to be false")
+		t.Error("Server.GRPC.Enabled default: want false, got true")
 	}
 	if cfg.Server.GRPC.Port != 9090 {
-		t.Errorf("expected GRPC.Port default 9090, got %d", cfg.Server.GRPC.Port)
-	}
-	if cfg.Storage.Redis.Enabled {
-		t.Error("expected Redis.Enabled default to be false")
-	}
-	if cfg.Storage.Neo4j.Enabled {
-		t.Error("expected Neo4j.Enabled default to be false")
+		t.Errorf("Server.GRPC.Port default: want 9090, got %d", cfg.Server.GRPC.Port)
 	}
 }
 
-func TestLoad_FullValidConfig(t *testing.T) {
+func TestLoad_StorageDefaults(t *testing.T) {
 	clearVergeEnv(t)
 	setEnv(t, map[string]string{
-		"VERGE_SERVER_HTTP_ENABLED":   "true",
-		"VERGE_SERVER_HTTP_PORT":      "9000",
-		"VERGE_SERVER_GRPC_ENABLED":   "true",
-		"VERGE_SERVER_GRPC_PORT":      "9001",
-		"VERGE_STORAGE_POSTGRES_URL":  "postgres://u:p@db:5432/mydb?sslmode=disable",
-		"VERGE_STORAGE_REDIS_ENABLED": "true",
-		"VERGE_STORAGE_REDIS_URL":     "redis://localhost:6379",
-		"VERGE_STORAGE_NEO4J_ENABLED": "true",
-		"VERGE_STORAGE_NEO4J_URL":     "bolt://localhost:7687",
+		"VERGE_STORAGE_POSTGRES_URL": "postgres://verge:changeme@localhost:5432/verge?sslmode=disable",
 	})
 
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("expected no error, got: %v", err)
 	}
 
-	if cfg.Server.HTTP.Port != 9000 {
-		t.Errorf("expected HTTP port 9000, got %d", cfg.Server.HTTP.Port)
+	if cfg.Storage.Redis.Enabled {
+		t.Error("Storage.Redis.Enabled default: want false, got true")
 	}
-	if cfg.Server.GRPC.Port != 9001 {
-		t.Errorf("expected GRPC port 9001, got %d", cfg.Server.GRPC.Port)
+	if cfg.Storage.Redis.BranchTTL != 30*time.Second {
+		t.Errorf("Storage.Redis.BranchTTL default: want 30s, got %s", cfg.Storage.Redis.BranchTTL)
 	}
-	if cfg.Storage.Postgres.URL != "postgres://u:p@db:5432/mydb?sslmode=disable" {
-		t.Errorf("unexpected Postgres URL: %s", cfg.Storage.Postgres.URL)
+	if cfg.Storage.Neo4j.Enabled {
+		t.Error("Storage.Neo4j.Enabled default: want false, got true")
 	}
-	if !cfg.Storage.Redis.Enabled {
-		t.Error("expected Redis to be enabled")
+}
+
+func TestLoad_OutboxDefaults(t *testing.T) {
+	clearVergeEnv(t)
+	setEnv(t, map[string]string{
+		"VERGE_STORAGE_POSTGRES_URL": "postgres://verge:changeme@localhost:5432/verge?sslmode=disable",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
 	}
-	if cfg.Storage.Redis.URL != "redis://localhost:6379" {
-		t.Errorf("unexpected Redis URL: %s", cfg.Storage.Redis.URL)
+
+	if cfg.Outbox.PollInterval != 500*time.Millisecond {
+		t.Errorf("Outbox.PollInterval default: want 500ms, got %s", cfg.Outbox.PollInterval)
 	}
-	if !cfg.Storage.Neo4j.Enabled {
-		t.Error("expected Neo4j to be enabled")
+	if cfg.Outbox.BatchSize != 100 {
+		t.Errorf("Outbox.BatchSize default: want 100, got %d", cfg.Outbox.BatchSize)
 	}
-	if cfg.Storage.Neo4j.URL != "bolt://localhost:7687" {
-		t.Errorf("unexpected Neo4j URL: %s", cfg.Storage.Neo4j.URL)
+	if cfg.Outbox.EventBus.Enabled {
+		t.Error("Outbox.EventBus.Enabled default: want false, got true")
+	}
+	if cfg.Outbox.EventBus.Type != "kafka" {
+		t.Errorf("Outbox.EventBus.Type default: want \"kafka\", got %q", cfg.Outbox.EventBus.Type)
+	}
+}
+
+func TestLoad_KafkaDefaults(t *testing.T) {
+	clearVergeEnv(t)
+	setEnv(t, map[string]string{
+		"VERGE_STORAGE_POSTGRES_URL": "postgres://verge:changeme@localhost:5432/verge?sslmode=disable",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if cfg.Kafka.Topic != "verge.events" {
+		t.Errorf("Kafka.Topic default: want \"verge.events\", got %q", cfg.Kafka.Topic)
+	}
+	if cfg.Kafka.Brokers != "" {
+		t.Errorf("Kafka.Brokers default: want empty string, got %q", cfg.Kafka.Brokers)
+	}
+}
+
+// server config
+
+func TestLoad_OnlyHTTPEnabled(t *testing.T) {
+	clearVergeEnv(t)
+	setEnv(t, map[string]string{
+		"VERGE_SERVER_HTTP_ENABLED":  "true",
+		"VERGE_SERVER_GRPC_ENABLED":  "false",
+		"VERGE_STORAGE_POSTGRES_URL": "postgres://u:p@localhost:5432/db?sslmode=disable",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error with only HTTP enabled, got: %v", err)
+	}
+	if !cfg.Server.HTTP.Enabled {
+		t.Error("expected HTTP to be enabled")
+	}
+	if cfg.Server.GRPC.Enabled {
+		t.Error("expected GRPC to be disabled")
 	}
 }
 
@@ -170,6 +218,20 @@ func TestLoad_OnlyGRPCEnabled(t *testing.T) {
 	}
 }
 
+func TestLoad_BothServersEnabled(t *testing.T) {
+	clearVergeEnv(t)
+	setEnv(t, map[string]string{
+		"VERGE_SERVER_HTTP_ENABLED":  "true",
+		"VERGE_SERVER_GRPC_ENABLED":  "true",
+		"VERGE_STORAGE_POSTGRES_URL": "postgres://u:p@localhost:5432/db?sslmode=disable",
+	})
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error with both servers enabled, got: %v", err)
+	}
+}
+
 func TestLoad_BothServersDisabled(t *testing.T) {
 	clearVergeEnv(t)
 	setEnv(t, map[string]string{
@@ -184,61 +246,99 @@ func TestLoad_BothServersDisabled(t *testing.T) {
 	}
 }
 
-func TestLoad_InvalidHTTPPort_Zero(t *testing.T) {
+func TestLoad_HTTPPort_Zero_IsInvalid(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_SERVER_HTTP_PORT"] = "0"
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_SERVER_HTTP_PORT"] = "0"
+	setEnv(t, e)
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected error for HTTP port 0")
+		t.Fatal("expected error for HTTP port 0 (validate: gt=0)")
 	}
 }
 
-func TestLoad_InvalidHTTPPort_Max(t *testing.T) {
+func TestLoad_HTTPPort_65535_IsInvalid(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_SERVER_HTTP_PORT"] = "65535"
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_SERVER_HTTP_PORT"] = "65535"
+	setEnv(t, e)
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected error for HTTP port 65535 (must be lt=65535)")
+		t.Fatal("expected error for HTTP port 65535 (validate: lt=65535)")
 	}
 }
 
-func TestLoad_InvalidGRPCPort_Zero(t *testing.T) {
+func TestLoad_HTTPPort_ValidBoundaries(t *testing.T) {
+	// gt=0, lt=65535 → valid range is [1, 65534]
+	for _, port := range []string{"1", "65534"} {
+		port := port
+		t.Run("port="+port, func(t *testing.T) {
+			clearVergeEnv(t)
+			e := baseEnv()
+			e["VERGE_SERVER_HTTP_PORT"] = port
+			setEnv(t, e)
+
+			_, err := Load()
+			if err != nil {
+				t.Fatalf("port %s should be valid, got: %v", port, err)
+			}
+		})
+	}
+}
+
+func TestLoad_GRPCPort_Zero_IsInvalid(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_SERVER_GRPC_ENABLED"] = "true"
-	env["VERGE_SERVER_GRPC_PORT"] = "0"
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_SERVER_GRPC_ENABLED"] = "true"
+	e["VERGE_SERVER_GRPC_PORT"] = "0"
+	setEnv(t, e)
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected error for GRPC port 0")
+		t.Fatal("expected error for GRPC port 0 (validate: gt=0)")
 	}
 }
 
-func TestLoad_ValidPortBoundaries(t *testing.T) {
+func TestLoad_GRPCPort_65535_IsInvalid(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_SERVER_HTTP_PORT"] = "1"     // minimum (gt=0)
-	env["VERGE_SERVER_GRPC_PORT"] = "65534" // maximum (lt=65535)
-	env["VERGE_SERVER_GRPC_ENABLED"] = "true"
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_SERVER_GRPC_ENABLED"] = "true"
+	e["VERGE_SERVER_GRPC_PORT"] = "65535"
+	setEnv(t, e)
 
 	_, err := Load()
-	if err != nil {
-		t.Fatalf("expected no error at port boundaries, got: %v", err)
+	if err == nil {
+		t.Fatal("expected error for GRPC port 65535 (validate: lt=65535)")
 	}
 }
+
+func TestLoad_GRPCPort_ValidBoundaries(t *testing.T) {
+	for _, port := range []string{"1", "65534"} {
+		port := port
+		t.Run("port="+port, func(t *testing.T) {
+			clearVergeEnv(t)
+			e := baseEnv()
+			e["VERGE_SERVER_GRPC_ENABLED"] = "true"
+			e["VERGE_SERVER_GRPC_PORT"] = port
+			setEnv(t, e)
+
+			_, err := Load()
+			if err != nil {
+				t.Fatalf("GRPC port %s should be valid, got: %v", port, err)
+			}
+		})
+	}
+}
+
+// postgres config
 
 func TestLoad_MissingPostgresURL(t *testing.T) {
 	clearVergeEnv(t)
 	setEnv(t, map[string]string{
 		"VERGE_SERVER_HTTP_ENABLED": "true",
+		// VERGE_STORAGE_POSTGRES_URL deliberately omitted
 	})
 
 	_, err := Load()
@@ -249,9 +349,9 @@ func TestLoad_MissingPostgresURL(t *testing.T) {
 
 func TestLoad_InvalidPostgresURL(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_POSTGRES_URL"] = "not-a-valid-url"
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_STORAGE_POSTGRES_URL"] = "not-a-valid-url"
+	setEnv(t, e)
 
 	_, err := Load()
 	if err == nil {
@@ -259,12 +359,31 @@ func TestLoad_InvalidPostgresURL(t *testing.T) {
 	}
 }
 
+func TestLoad_ValidPostgresURL(t *testing.T) {
+	clearVergeEnv(t)
+	const pgURL = "postgres://u:p@localhost:5432/mydb?sslmode=disable"
+	setEnv(t, map[string]string{
+		"VERGE_SERVER_HTTP_ENABLED":  "true",
+		"VERGE_STORAGE_POSTGRES_URL": pgURL,
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Storage.Postgres.URL != pgURL {
+		t.Errorf("Storage.Postgres.URL: want %q, got %q", pgURL, cfg.Storage.Postgres.URL)
+	}
+}
+
+// Redis config
+
 func TestLoad_RedisEnabledWithURL(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_REDIS_ENABLED"] = "true"
-	env["VERGE_STORAGE_REDIS_URL"] = "redis://localhost:6379"
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_STORAGE_REDIS_ENABLED"] = "true"
+	e["VERGE_STORAGE_REDIS_URL"] = "redis://localhost:6379"
+	setEnv(t, e)
 
 	_, err := Load()
 	if err != nil {
@@ -274,10 +393,10 @@ func TestLoad_RedisEnabledWithURL(t *testing.T) {
 
 func TestLoad_RedisEnabledWithoutURL(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_REDIS_ENABLED"] = "true"
-	env["VERGE_STORAGE_REDIS_URL"] = ""
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_STORAGE_REDIS_ENABLED"] = "true"
+	e["VERGE_STORAGE_REDIS_URL"] = ""
+	setEnv(t, e)
 
 	_, err := Load()
 	if err == nil {
@@ -285,39 +404,12 @@ func TestLoad_RedisEnabledWithoutURL(t *testing.T) {
 	}
 }
 
-func TestLoad_RedisDisabledWithoutURL(t *testing.T) {
+func TestLoad_RedisEnabledWithInvalidURL(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_REDIS_ENABLED"] = "false"
-	env["VERGE_STORAGE_REDIS_URL"] = ""
-	setEnv(t, env)
-
-	_, err := Load()
-	if err != nil {
-		t.Fatalf("expected no error when Redis is disabled and URL is empty, got: %v", err)
-	}
-}
-
-func TestLoad_RedisDisabledWithURL(t *testing.T) {
-	// URL present but Redis disabled — should be fine (omitempty)
-	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_REDIS_ENABLED"] = "false"
-	env["VERGE_STORAGE_REDIS_URL"] = "redis://localhost:6379"
-	setEnv(t, env)
-
-	_, err := Load()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoad_RedisEnabledInvalidURL(t *testing.T) {
-	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_REDIS_ENABLED"] = "true"
-	env["VERGE_STORAGE_REDIS_URL"] = "not-a-url"
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_STORAGE_REDIS_ENABLED"] = "true"
+	e["VERGE_STORAGE_REDIS_URL"] = "not-a-url"
+	setEnv(t, e)
 
 	_, err := Load()
 	if err == nil {
@@ -325,12 +417,69 @@ func TestLoad_RedisEnabledInvalidURL(t *testing.T) {
 	}
 }
 
+func TestLoad_RedisDisabledWithoutURL(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_STORAGE_REDIS_ENABLED"] = "false"
+	e["VERGE_STORAGE_REDIS_URL"] = ""
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error when Redis is disabled and URL is empty, got: %v", err)
+	}
+}
+
+func TestLoad_RedisDisabledURLPresentIsAllowed(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_STORAGE_REDIS_ENABLED"] = "false"
+	e["VERGE_STORAGE_REDIS_URL"] = "redis://localhost:6379"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error when Redis is disabled with a URL present, got: %v", err)
+	}
+}
+
+func TestLoad_RedisBranchTTL_CustomValue(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_STORAGE_REDIS_ENABLED"] = "true"
+	e["VERGE_STORAGE_REDIS_URL"] = "redis://localhost:6379"
+	e["VERGE_STORAGE_REDIS_BRANCH_TTL"] = "2m"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Storage.Redis.BranchTTL != 2*time.Minute {
+		t.Errorf("Storage.Redis.BranchTTL: want 2m, got %s", cfg.Storage.Redis.BranchTTL)
+	}
+}
+
+func TestLoad_RedisBranchTTL_InvalidDuration(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_STORAGE_REDIS_BRANCH_TTL"] = "not-a-duration"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid BranchTTL duration string")
+	}
+}
+
+// Neo4j config
+
 func TestLoad_Neo4jEnabledWithURL(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_NEO4J_ENABLED"] = "true"
-	env["VERGE_STORAGE_NEO4J_URL"] = "bolt://localhost:7687"
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_STORAGE_NEO4J_ENABLED"] = "true"
+	e["VERGE_STORAGE_NEO4J_URL"] = "bolt://localhost:7687"
+	setEnv(t, e)
 
 	_, err := Load()
 	if err != nil {
@@ -340,10 +489,10 @@ func TestLoad_Neo4jEnabledWithURL(t *testing.T) {
 
 func TestLoad_Neo4jEnabledWithoutURL(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_NEO4J_ENABLED"] = "true"
-	env["VERGE_STORAGE_NEO4J_URL"] = ""
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_STORAGE_NEO4J_ENABLED"] = "true"
+	e["VERGE_STORAGE_NEO4J_URL"] = ""
+	setEnv(t, e)
 
 	_, err := Load()
 	if err == nil {
@@ -351,12 +500,25 @@ func TestLoad_Neo4jEnabledWithoutURL(t *testing.T) {
 	}
 }
 
+func TestLoad_Neo4jEnabledWithInvalidURL(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_STORAGE_NEO4J_ENABLED"] = "true"
+	e["VERGE_STORAGE_NEO4J_URL"] = "not-a-url"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid Neo4j URL")
+	}
+}
+
 func TestLoad_Neo4jDisabledWithoutURL(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_NEO4J_ENABLED"] = "false"
-	env["VERGE_STORAGE_NEO4J_URL"] = ""
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_STORAGE_NEO4J_ENABLED"] = "false"
+	e["VERGE_STORAGE_NEO4J_URL"] = ""
+	setEnv(t, e)
 
 	_, err := Load()
 	if err != nil {
@@ -364,16 +526,254 @@ func TestLoad_Neo4jDisabledWithoutURL(t *testing.T) {
 	}
 }
 
-func TestLoad_Neo4jEnabledInvalidURL(t *testing.T) {
+func TestLoad_Neo4jDisabledURLPresentIsAllowed(t *testing.T) {
 	clearVergeEnv(t)
-	env := baseEnv()
-	env["VERGE_STORAGE_NEO4J_ENABLED"] = "true"
-	env["VERGE_STORAGE_NEO4J_URL"] = "not-a-url"
-	setEnv(t, env)
+	e := baseEnv()
+	e["VERGE_STORAGE_NEO4J_ENABLED"] = "false"
+	e["VERGE_STORAGE_NEO4J_URL"] = "bolt://localhost:7687"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error when Neo4j is disabled with a URL present, got: %v", err)
+	}
+}
+
+// outbox config
+
+func TestLoad_OutboxCustomPollInterval(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_POLL_INTERVAL"] = "1s"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Outbox.PollInterval != time.Second {
+		t.Errorf("Outbox.PollInterval: want 1s, got %s", cfg.Outbox.PollInterval)
+	}
+}
+
+func TestLoad_OutboxInvalidPollInterval(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_POLL_INTERVAL"] = "not-a-duration"
+	setEnv(t, e)
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected error for invalid Neo4j URL")
+		t.Fatal("expected error for invalid PollInterval duration string")
+	}
+}
+
+func TestLoad_OutboxCustomBatchSize(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_BATCH_SIZE"] = "50"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Outbox.BatchSize != 50 {
+		t.Errorf("Outbox.BatchSize: want 50, got %d", cfg.Outbox.BatchSize)
+	}
+}
+
+func TestLoad_OutboxInvalidBatchSize(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_BATCH_SIZE"] = "not-a-number"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for non-integer BatchSize")
+	}
+}
+
+func TestLoad_OutboxEventBus_EnabledKafka_IsValid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_EVENTBUS_ENABLED"] = "true"
+	e["VERGE_OUTBOX_EVENTBUS_TYPE"] = "kafka"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error with EventBus enabled and type=kafka, got: %v", err)
+	}
+}
+
+func TestLoad_OutboxEventBus_EnabledCustomType_IsAllowed(t *testing.T) {
+	for _, busType := range []string{"kafka", "rabbitmq", "sqs", "pubsub", "custom"} {
+		busType := busType
+		t.Run("type="+busType, func(t *testing.T) {
+			clearVergeEnv(t)
+			e := baseEnv()
+			e["VERGE_OUTBOX_EVENTBUS_ENABLED"] = "true"
+			e["VERGE_OUTBOX_EVENTBUS_TYPE"] = busType
+			setEnv(t, e)
+
+			_, err := Load()
+			if err != nil {
+				t.Fatalf("type %q should be valid when EventBus is enabled, got: %v", busType, err)
+			}
+		})
+	}
+}
+
+func TestLoad_OutboxEventBus_EnabledEmptyType_IsInvalid(t *testing.T) {
+	cfg := &Config{
+		Server: Server{
+			HTTP: HTTP{Enabled: true, Port: 8080},
+			GRPC: GRPC{Enabled: false, Port: 9090},
+		},
+		Storage: Storage{
+			Postgres: PGConfig{URL: "postgres://u:p@localhost:5432/db?sslmode=disable"},
+		},
+		Outbox: OutboxConfig{
+			PollInterval: 500 * time.Millisecond,
+			BatchSize:    100,
+			EventBus: EventBusConfig{
+				Enabled: true,
+				Type:    "", // explicitly empty
+			},
+		},
+	}
+
+	if err := validate(cfg); err == nil {
+		t.Fatal("expected error when EventBus is enabled with an empty type")
+	}
+}
+
+func TestLoad_OutboxEventBus_DisabledTypeIgnored(t *testing.T) {
+	for _, busType := range []string{"", "rabbitmq", "sqs"} {
+		busType := busType
+		t.Run("type="+busType, func(t *testing.T) {
+			clearVergeEnv(t)
+			e := baseEnv()
+			e["VERGE_OUTBOX_EVENTBUS_ENABLED"] = "false"
+			e["VERGE_OUTBOX_EVENTBUS_TYPE"] = busType
+			setEnv(t, e)
+
+			_, err := Load()
+			if err != nil {
+				t.Fatalf(
+					"type %q should be allowed when EventBus is disabled, got: %v",
+					busType,
+					err,
+				)
+			}
+		})
+	}
+}
+
+// kafka config
+
+func TestLoad_KafkaCustomValues(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_EVENTBUS_ENABLED"] = "true"
+	e["VERGE_OUTBOX_EVENTBUS_TYPE"] = "kafka"
+	e["VERGE_KAFKA_BROKERS"] = "kafka1:9092,kafka2:9092"
+	e["VERGE_KAFKA_TOPIC"] = "my-custom-topic"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Kafka.Brokers != "kafka1:9092,kafka2:9092" {
+		t.Errorf("Kafka.Brokers: want %q, got %q", "kafka1:9092,kafka2:9092", cfg.Kafka.Brokers)
+	}
+	if cfg.Kafka.Topic != "my-custom-topic" {
+		t.Errorf("Kafka.Topic: want %q, got %q", "my-custom-topic", cfg.Kafka.Topic)
+	}
+}
+
+// full config round-trip
+
+func TestLoad_FullValidConfig(t *testing.T) {
+	clearVergeEnv(t)
+	setEnv(t, map[string]string{
+		"VERGE_SERVER_HTTP_ENABLED": "true",
+		"VERGE_SERVER_HTTP_PORT":    "9000",
+		"VERGE_SERVER_GRPC_ENABLED": "true",
+		"VERGE_SERVER_GRPC_PORT":    "9001",
+
+		"VERGE_STORAGE_POSTGRES_URL":     "postgres://u:p@db:5432/mydb?sslmode=disable",
+		"VERGE_STORAGE_REDIS_ENABLED":    "true",
+		"VERGE_STORAGE_REDIS_URL":        "redis://localhost:6379",
+		"VERGE_STORAGE_REDIS_BRANCH_TTL": "1m",
+		"VERGE_STORAGE_NEO4J_ENABLED":    "true",
+		"VERGE_STORAGE_NEO4J_URL":        "bolt://localhost:7687",
+
+		"VERGE_OUTBOX_POLL_INTERVAL":    "250ms",
+		"VERGE_OUTBOX_BATCH_SIZE":       "200",
+		"VERGE_OUTBOX_EVENTBUS_ENABLED": "true",
+		"VERGE_OUTBOX_EVENTBUS_TYPE":    "kafka",
+
+		"VERGE_KAFKA_BROKERS": "kafka:9092",
+		"VERGE_KAFKA_TOPIC":   "verge.prod.events",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// server
+	if cfg.Server.HTTP.Port != 9000 {
+		t.Errorf("Server.HTTP.Port: want 9000, got %d", cfg.Server.HTTP.Port)
+	}
+	if cfg.Server.GRPC.Port != 9001 {
+		t.Errorf("Server.GRPC.Port: want 9001, got %d", cfg.Server.GRPC.Port)
+	}
+
+	// storage
+	if cfg.Storage.Postgres.URL != "postgres://u:p@db:5432/mydb?sslmode=disable" {
+		t.Errorf("Storage.Postgres.URL: unexpected value %q", cfg.Storage.Postgres.URL)
+	}
+	if !cfg.Storage.Redis.Enabled {
+		t.Error("Storage.Redis.Enabled: want true, got false")
+	}
+	if cfg.Storage.Redis.URL != "redis://localhost:6379" {
+		t.Errorf("Storage.Redis.URL: unexpected value %q", cfg.Storage.Redis.URL)
+	}
+	if cfg.Storage.Redis.BranchTTL != time.Minute {
+		t.Errorf("Storage.Redis.BranchTTL: want 1m, got %s", cfg.Storage.Redis.BranchTTL)
+	}
+	if !cfg.Storage.Neo4j.Enabled {
+		t.Error("Storage.Neo4j.Enabled: want true, got false")
+	}
+	if cfg.Storage.Neo4j.URL != "bolt://localhost:7687" {
+		t.Errorf("Storage.Neo4j.URL: unexpected value %q", cfg.Storage.Neo4j.URL)
+	}
+
+	// outbox
+	if cfg.Outbox.PollInterval != 250*time.Millisecond {
+		t.Errorf("Outbox.PollInterval: want 250ms, got %s", cfg.Outbox.PollInterval)
+	}
+	if cfg.Outbox.BatchSize != 200 {
+		t.Errorf("Outbox.BatchSize: want 200, got %d", cfg.Outbox.BatchSize)
+	}
+	if !cfg.Outbox.EventBus.Enabled {
+		t.Error("Outbox.EventBus.Enabled: want true, got false")
+	}
+	if cfg.Outbox.EventBus.Type != "kafka" {
+		t.Errorf("Outbox.EventBus.Type: want \"kafka\", got %q", cfg.Outbox.EventBus.Type)
+	}
+
+	// kafka
+	if cfg.Kafka.Brokers != "kafka:9092" {
+		t.Errorf("Kafka.Brokers: want \"kafka:9092\", got %q", cfg.Kafka.Brokers)
+	}
+	if cfg.Kafka.Topic != "verge.prod.events" {
+		t.Errorf("Kafka.Topic: want \"verge.prod.events\", got %q", cfg.Kafka.Topic)
 	}
 }
 
@@ -390,6 +790,6 @@ func TestLoad_AllStorageEnabled(t *testing.T) {
 
 	_, err := Load()
 	if err != nil {
-		t.Fatalf("expected no error with all storage enabled, got: %v", err)
+		t.Fatalf("expected no error with all storage backends enabled, got: %v", err)
 	}
 }

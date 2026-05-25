@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/caarlos0/env/v10"
 	"github.com/go-playground/validator/v10"
@@ -27,6 +28,12 @@ type PGConfig struct {
 	URL string `env:"URL" validate:"required,url"`
 }
 
+type RedisConfig struct {
+	Enabled   bool          `env:"ENABLED"    envDefault:"false"`
+	URL       string        `env:"URL"                           validate:"omitempty,url"`
+	BranchTTL time.Duration `env:"BRANCH_TTL" envDefault:"30s"` // TTL for branch head cache entries
+}
+
 type OptionalDBConfig struct {
 	Enabled bool   `env:"ENABLED" envDefault:"false"`
 	URL     string `env:"URL"                        validate:"omitempty,url"`
@@ -34,13 +41,32 @@ type OptionalDBConfig struct {
 
 type Storage struct {
 	Postgres PGConfig         `envPrefix:"POSTGRES_"`
-	Redis    OptionalDBConfig `envPrefix:"REDIS_"`
+	Redis    RedisConfig      `envPrefix:"REDIS_"`
 	Neo4j    OptionalDBConfig `envPrefix:"NEO4J_"`
 }
 
+type EventBusConfig struct {
+	Enabled bool   `env:"ENABLED" envDefault:"false"`
+	Type    string `env:"TYPE"    envDefault:"kafka"`
+}
+
+type OutboxConfig struct {
+	PollInterval time.Duration  `env:"POLL_INTERVAL" envDefault:"500ms"`
+	BatchSize    int            `env:"BATCH_SIZE"    envDefault:"100"`
+	EventBus     EventBusConfig `                                       envPrefix:"EVENTBUS_"`
+}
+
+// only read when Outbox.EventBus.Enabled = true and Outbox.EventBus.Type = "kafka"
+type KafkaConfig struct {
+	Brokers string `env:"BROKERS" envDefault:""` // comma-separated, e.g. "kafka:9092"
+	Topic   string `env:"TOPIC"   envDefault:"verge.events"`
+}
+
 type Config struct {
-	Server  Server  `envPrefix:"SERVER_"`
-	Storage Storage `envPrefix:"STORAGE_"`
+	Server  Server       `envPrefix:"SERVER_"`
+	Storage Storage      `envPrefix:"STORAGE_"`
+	Outbox  OutboxConfig `envPrefix:"OUTBOX_"`
+	Kafka   KafkaConfig  `envPrefix:"KAFKA_"`
 }
 
 func Load() (*Config, error) {
@@ -65,6 +91,7 @@ func validate(cfg *Config) error {
 
 	v.RegisterStructValidation(validateServer, Server{})
 	v.RegisterStructValidation(validateStorage, Storage{})
+	v.RegisterStructValidation(validateOutbox, OutboxConfig{})
 
 	return v.Struct(cfg)
 }
@@ -87,5 +114,13 @@ func validateStorage(sl validator.StructLevel) {
 
 	if s.Neo4j.Enabled && s.Neo4j.URL == "" {
 		sl.ReportError(s.Neo4j.URL, "Neo4j.URL", "url", "required-if-enabled", "")
+	}
+}
+
+func validateOutbox(sl validator.StructLevel) {
+	o := sl.Current().Interface().(OutboxConfig)
+
+	if o.EventBus.Enabled && o.EventBus.Type == "" {
+		sl.ReportError(o.EventBus.Type, "EventBus.Type", "type", "required-if-enabled", "")
 	}
 }
