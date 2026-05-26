@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mock
+// mocks
 
 type mockHandler struct {
 	types    []string
@@ -41,12 +42,86 @@ func newFailingHandler(eventType string, err error) *mockHandler {
 	}
 }
 
-func newWorkerWithHandlers(handlers ...OutboxHandler) *Worker {
-	return &Worker{
-		handlers: handlers,
-		interval: 500 * time.Millisecond,
-		batch:    100,
+type mockEventBus struct {
+	published []OutboxEvent
+	err       error
+}
+
+func (m *mockEventBus) Publish(_ context.Context, events []OutboxEvent) error {
+	m.published = append(m.published, events...)
+	return m.err
+}
+
+type mockSource struct {
+	name    string
+	events  []OutboxEvent // returned on the first Next() call, empty on subsequent calls
+	nextErr error
+	ackErr  error
+	started bool
+	closed  bool
+	acked   []string
+	drained chan struct{} // closed once events have been drained by Next()
+}
+
+func newMockSource(events ...OutboxEvent) *mockSource {
+	return &mockSource{
+		events:  events,
+		drained: make(chan struct{}),
 	}
+}
+
+func (m *mockSource) Start(_ context.Context) error {
+	m.started = true
+	return nil
+}
+
+func (m *mockSource) Next(ctx context.Context) ([]OutboxEvent, error) {
+	if m.nextErr != nil {
+		return nil, m.nextErr
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	events := m.events
+	if events != nil {
+		m.events = nil // drain so subsequent calls return empty
+		if m.drained != nil {
+			select {
+			case <-m.drained: // already closed
+			default:
+				close(m.drained)
+			}
+		}
+	}
+	return events, nil
+}
+
+func (m *mockSource) Ack(_ context.Context, ids []string) error {
+	m.acked = append(m.acked, ids...)
+	return m.ackErr
+}
+
+func (m *mockSource) Close() error {
+	m.closed = true
+	return nil
+}
+
+func (m *mockSource) Name() string {
+	if m.name != "" {
+		return m.name
+	}
+	return "mock"
+}
+
+// helpers
+
+func newWorkerWithHandlers(handlers ...OutboxHandler) *Worker {
+	return NewWorker(
+		WithSource(newMockSource()),
+		WithHandlers(handlers),
+	)
 }
 
 func makeEvent(id, eventType string) OutboxEvent {
@@ -56,6 +131,128 @@ func makeEvent(id, eventType string) OutboxEvent {
 		Payload:   []byte(`{}`),
 		CreatedAt: time.Now(),
 	}
+}
+
+// NewWorker / options
+
+func TestNewWorker_Defaults(t *testing.T) {
+	w := NewWorker()
+
+	assert.Nil(t, w.source)
+	assert.Nil(t, w.bus)
+	assert.Empty(t, w.handlers)
+}
+
+func TestWithSource_Set(t *testing.T) {
+	src := newMockSource()
+	src.name = "test"
+	w := NewWorker(WithSource(src))
+
+	assert.Equal(t, src, w.source)
+	assert.Equal(t, "test", w.source.Name())
+}
+
+func TestWithHandlers_Registered(t *testing.T) {
+	h1 := newHandler(EventTypeCommitCreated)
+	h2 := newHandler(EventTypeBranchHeadMoved)
+	w := NewWorker(WithHandlers([]OutboxHandler{h1, h2}))
+
+	assert.Len(t, w.handlers, 2)
+}
+
+func TestWithEventBus_Set(t *testing.T) {
+	bus := &mockEventBus{}
+	w := NewWorker(WithEventBus(bus))
+
+	assert.NotNil(t, w.bus)
+}
+
+// Run
+
+func TestWorker_Run_NoSource_ReturnsError(t *testing.T) {
+	w := NewWorker()
+
+	err := w.Run(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "source is required")
+}
+
+func TestWorker_Run_StartsAndStopsSource(t *testing.T) {
+	src := newMockSource()
+	w := NewWorker(WithSource(src))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_ = w.Run(ctx)
+
+	assert.True(t, src.started)
+	assert.True(t, src.closed)
+}
+
+func TestWorker_Run_AcksSuccessfullyProcessedEvents(t *testing.T) {
+	event := makeEvent("evt-1", EventTypeCommitCreated)
+	h := newHandler(EventTypeCommitCreated)
+	src := newMockSource(event)
+
+	w := NewWorker(WithSource(src), WithHandlers([]OutboxHandler{h}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// cancel as soon as the source has been drained and acked
+	go func() {
+		<-src.drained // Next() consumed the events
+		// give the worker a moment to ack before we cancel
+		for len(src.acked) == 0 {
+			runtime.Gosched()
+		}
+		cancel()
+	}()
+	_ = w.Run(ctx)
+
+	assert.Equal(t, []string{"evt-1"}, src.acked)
+	assert.Equal(t, 1, h.callCount())
+}
+
+func TestWorker_Run_EventBusMode_AcksAllEvents(t *testing.T) {
+	events := []OutboxEvent{
+		makeEvent("evt-1", EventTypeCommitCreated),
+		makeEvent("evt-2", EventTypeBranchHeadMoved),
+	}
+	bus := &mockEventBus{}
+	src := newMockSource(events...)
+
+	w := NewWorker(WithSource(src), WithEventBus(bus))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-src.drained
+		for len(src.acked) < 2 {
+			runtime.Gosched()
+		}
+		cancel()
+	}()
+	_ = w.Run(ctx)
+
+	assert.Len(t, bus.published, 2)
+	assert.ElementsMatch(t, []string{"evt-1", "evt-2"}, src.acked)
+}
+
+func TestWorker_Run_EventBusPublishFails_NothingAcked(t *testing.T) {
+	src := newMockSource(makeEvent("evt-1", EventTypeCommitCreated))
+	bus := &mockEventBus{err: errors.New("broker down")}
+
+	w := NewWorker(WithSource(src), WithEventBus(bus))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-src.drained
+		cancel()
+	}()
+	_ = w.Run(ctx)
+
+	assert.Empty(t, src.acked, "nothing should be acked when Publish fails")
 }
 
 // dispatch
@@ -177,72 +374,66 @@ func TestWorker_Dispatch_EventPayloadForwardedToHandler(t *testing.T) {
 	assert.Equal(t, event.CreatedAt, got.CreatedAt)
 }
 
-// NewWorker
+// processEvents
 
-func TestNewWorker_Defaults(t *testing.T) {
-	w := NewWorker(nil)
+func TestWorker_ProcessEvents_InProcess_SuccessReturnsAllIDs(t *testing.T) {
+	h := newHandler(EventTypeCommitCreated)
+	w := newWorkerWithHandlers(h)
 
-	assert.Equal(t, 500*time.Millisecond, w.interval)
-	assert.Equal(t, 100, w.batch)
-	assert.Nil(t, w.bus)
-	assert.Empty(t, w.handlers)
+	events := []OutboxEvent{
+		makeEvent("evt-1", EventTypeCommitCreated),
+		makeEvent("evt-2", EventTypeCommitCreated),
+	}
+	processed := w.processEvents(context.Background(), events)
+
+	assert.Equal(t, []string{"evt-1", "evt-2"}, processed)
+	assert.Equal(t, 2, h.callCount())
 }
 
-func TestWithInterval_PositiveValue_Applied(t *testing.T) {
-	w := NewWorker(nil, WithInterval(2*time.Second))
-	assert.Equal(t, 2*time.Second, w.interval)
+func TestWorker_ProcessEvents_InProcess_HandlerFails_FailedIDNotReturned(t *testing.T) {
+	goodH := newHandler(EventTypeCommitCreated)
+	failH := newFailingHandler(EventTypeBranchHeadMoved, errors.New("fail"))
+	w := newWorkerWithHandlers(goodH, failH)
+
+	events := []OutboxEvent{
+		makeEvent("evt-good", EventTypeCommitCreated),
+		makeEvent("evt-fail", EventTypeBranchHeadMoved),
+	}
+	processed := w.processEvents(context.Background(), events)
+
+	assert.Equal(t, []string{"evt-good"}, processed)
 }
 
-func TestWithInterval_Zero_DefaultKept(t *testing.T) {
-	w := NewWorker(nil, WithInterval(0))
-	assert.Equal(t, 500*time.Millisecond, w.interval, "zero interval must not override the default")
-}
-
-func TestWithInterval_Negative_DefaultKept(t *testing.T) {
-	w := NewWorker(nil, WithInterval(-1*time.Second))
-	assert.Equal(
-		t,
-		500*time.Millisecond,
-		w.interval,
-		"negative interval must not override the default",
-	)
-}
-
-func TestWithBatchSize_PositiveValue_Applied(t *testing.T) {
-	w := NewWorker(nil, WithBatchSize(50))
-	assert.Equal(t, 50, w.batch)
-}
-
-func TestWithBatchSize_Zero_DefaultKept(t *testing.T) {
-	w := NewWorker(nil, WithBatchSize(0))
-	assert.Equal(t, 100, w.batch, "zero batch size must not override the default")
-}
-
-func TestWithBatchSize_Negative_DefaultKept(t *testing.T) {
-	w := NewWorker(nil, WithBatchSize(-5))
-	assert.Equal(t, 100, w.batch, "negative batch size must not override the default")
-}
-
-func TestWithHandlers_Registered(t *testing.T) {
-	h1 := newHandler(EventTypeCommitCreated)
-	h2 := newHandler(EventTypeBranchHeadMoved)
-	w := NewWorker(nil, WithHandlers([]OutboxHandler{h1, h2}))
-
-	assert.Len(t, w.handlers, 2)
-}
-
-func TestWithEventBus_Set(t *testing.T) {
+func TestWorker_ProcessEvents_EventBus_PublishSucceeds_ReturnsAllIDs(t *testing.T) {
 	bus := &mockEventBus{}
-	w := NewWorker(nil, WithEventBus(bus))
-	assert.NotNil(t, w.bus)
+	w := NewWorker(WithSource(newMockSource()), WithEventBus(bus))
+
+	events := []OutboxEvent{
+		makeEvent("evt-1", EventTypeCommitCreated),
+		makeEvent("evt-2", EventTypeBranchHeadMoved),
+	}
+	processed := w.processEvents(context.Background(), events)
+
+	assert.Equal(t, []string{"evt-1", "evt-2"}, processed)
+	assert.Len(t, bus.published, 2)
 }
 
-type mockEventBus struct {
-	published []OutboxEvent
-	err       error
+func TestWorker_ProcessEvents_EventBus_PublishFails_ReturnsNoIDs(t *testing.T) {
+	bus := &mockEventBus{err: errors.New("broker down")}
+	w := NewWorker(WithSource(newMockSource()), WithEventBus(bus))
+
+	events := []OutboxEvent{makeEvent("evt-1", EventTypeCommitCreated)}
+	processed := w.processEvents(context.Background(), events)
+
+	assert.Empty(t, processed)
 }
 
-func (m *mockEventBus) Publish(_ context.Context, events []OutboxEvent) error {
-	m.published = append(m.published, events...)
-	return m.err
+func TestWorker_ProcessEvents_EventBus_InProcessHandlersNotCalled(t *testing.T) {
+	h := newHandler(EventTypeCommitCreated)
+	bus := &mockEventBus{}
+	w := NewWorker(WithSource(newMockSource()), WithEventBus(bus), WithHandlers([]OutboxHandler{h}))
+
+	w.processEvents(context.Background(), []OutboxEvent{makeEvent("evt-1", EventTypeCommitCreated)})
+
+	assert.Equal(t, 0, h.callCount(), "in-process handlers must not be called in EventBus mode")
 }

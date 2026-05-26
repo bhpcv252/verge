@@ -118,13 +118,17 @@ func startServerWithConfig(t *testing.T, cfg infraConfig) *testEnv {
 		workerCtx, stopWorker := context.WithCancel(ctx)
 		t.Cleanup(stopWorker)
 
+		// PollingSource owns the interval and batch size
+		src := outbox.NewPollingSource(pool, 25*time.Millisecond, 100)
 		worker := outbox.NewWorker(
-			pool,
+			outbox.WithSource(src),
 			outbox.WithHandlers(handlers),
-			outbox.WithInterval(25*time.Millisecond),
-			outbox.WithBatchSize(100),
 		)
-		go worker.Run(workerCtx)
+		go func() {
+			if err := worker.Run(workerCtx); err != nil {
+				t.Logf("outbox worker stopped: %v", err)
+			}
+		}()
 	}
 
 	// REST server

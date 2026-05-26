@@ -71,7 +71,6 @@ func startKafkaEnv(t *testing.T) *kafkaEnv {
 
 	env := startServerWithConfig(t, cfg)
 
-	// ensure Redis and Neo4j are wired before using them
 	require.NotNil(t, env.rdb, "Redis must be wired for Kafka tests")
 	require.NotNil(t, env.neo4jDriver, "Neo4j must be wired for Kafka tests")
 
@@ -86,13 +85,16 @@ func startKafkaEnv(t *testing.T) *kafkaEnv {
 	producerCtx, stopProducer := context.WithCancel(context.Background())
 	t.Cleanup(stopProducer)
 
-	worker := outbox.NewWorker(
-		env.pool,
+	producerSrc := outbox.NewPollingSource(env.pool, 25*time.Millisecond, 100)
+	producerWorker := outbox.NewWorker(
+		outbox.WithSource(producerSrc),
 		outbox.WithEventBus(producer),
-		outbox.WithInterval(25*time.Millisecond),
-		outbox.WithBatchSize(100),
 	)
-	go worker.Run(producerCtx)
+	go func() {
+		if err := producerWorker.Run(producerCtx); err != nil {
+			t.Logf("kafka producer worker stopped: %v", err)
+		}
+	}()
 
 	// consumer side
 
@@ -131,7 +133,7 @@ func startKafkaEnv(t *testing.T) *kafkaEnv {
 func (ke *kafkaEnv) waitForProjections(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	ke.waitForOutbox(t, timeout)
-	// Additional buffer for Kafka message propagation and consumer processing
+	// additional buffer for Kafka message propagation and consumer processing
 	time.Sleep(10 * time.Second)
 }
 
@@ -214,12 +216,12 @@ func TestKafka_MergeCompleted_UpdatesRedisAndNeo4j(t *testing.T) {
 }
 
 func TestKafka_BrokerUnavailable_EventsProcessedAfterRecovery(t *testing.T) {
-	// set up infra but skip the outbox worker entirely so we can wire our own
 	pool, pgCleanup := testhelper.SetupPostgres(t)
 	t.Cleanup(pgCleanup)
 
 	rp := startRedpanda(t)
 
+	// wire a worker pointing at a broken broker so publishes always fail
 	brokenAddr := unusedLocalAddr(t)
 	brokenProducer := kafka.NewProducer(kafka.Config{
 		Brokers: []string{brokenAddr},
@@ -230,13 +232,16 @@ func TestKafka_BrokerUnavailable_EventsProcessedAfterRecovery(t *testing.T) {
 	brokenWorkerCtx, stopBrokenWorker := context.WithCancel(context.Background())
 	t.Cleanup(stopBrokenWorker)
 
+	brokenSrc := outbox.NewPollingSource(pool, 25*time.Millisecond, 100)
 	brokenWorker := outbox.NewWorker(
-		pool,
+		outbox.WithSource(brokenSrc),
 		outbox.WithEventBus(brokenProducer),
-		outbox.WithInterval(25*time.Millisecond),
-		outbox.WithBatchSize(100),
 	)
-	go brokenWorker.Run(brokenWorkerCtx)
+	go func() {
+		if err := brokenWorker.Run(brokenWorkerCtx); err != nil {
+			t.Logf("broken worker stopped: %v", err)
+		}
+	}()
 
 	_, err := pool.Exec(context.Background(), `
 		INSERT INTO outbox_events (id, event_type, payload, processed, created_at)
@@ -258,6 +263,7 @@ func TestKafka_BrokerUnavailable_EventsProcessedAfterRecovery(t *testing.T) {
 
 	stopBrokenWorker()
 
+	// now wire a worker pointing at the real broker
 	realProducer := kafka.NewProducer(kafka.Config{
 		Brokers: rp.brokers,
 		Topic:   rp.topic,
@@ -267,13 +273,16 @@ func TestKafka_BrokerUnavailable_EventsProcessedAfterRecovery(t *testing.T) {
 	realWorkerCtx, stopRealWorker := context.WithCancel(context.Background())
 	t.Cleanup(stopRealWorker)
 
+	realSrc := outbox.NewPollingSource(pool, 25*time.Millisecond, 100)
 	realWorker := outbox.NewWorker(
-		pool,
+		outbox.WithSource(realSrc),
 		outbox.WithEventBus(realProducer),
-		outbox.WithInterval(25*time.Millisecond),
-		outbox.WithBatchSize(100),
 	)
-	go realWorker.Run(realWorkerCtx)
+	go func() {
+		if err := realWorker.Run(realWorkerCtx); err != nil {
+			t.Logf("real worker stopped: %v", err)
+		}
+	}()
 
 	// wait until all rows are processed
 	require.Eventually(t, func() bool {
@@ -282,7 +291,8 @@ func TestKafka_BrokerUnavailable_EventsProcessedAfterRecovery(t *testing.T) {
 			`SELECT COUNT(*) FROM outbox_events WHERE processed = false`,
 		).Scan(&p)
 		return p == 0
-	}, 30*time.Second, 100*time.Millisecond, "all outbox rows must be processed once the broker becomes available again")
+	}, 30*time.Second, 100*time.Millisecond,
+		"all outbox rows must be processed once the broker becomes available again")
 }
 
 func TestKafka_ConcurrentBranchAdvances_ExactlyOneEventWins(t *testing.T) {
@@ -300,7 +310,7 @@ func TestKafka_ConcurrentBranchAdvances_ExactlyOneEventWins(t *testing.T) {
 
 	type result struct {
 		status   int
-		commitID string // the commit_id they tried to advance to
+		commitID string
 	}
 	results := make([]result, 2)
 	var wg sync.WaitGroup
@@ -325,7 +335,6 @@ func TestKafka_ConcurrentBranchAdvances_ExactlyOneEventWins(t *testing.T) {
 	assert.Contains(t, statuses, http.StatusOK, "one advance must succeed")
 	assert.Contains(t, statuses, http.StatusConflict, "one advance must be rejected")
 
-	// figure out which commit won
 	var winnerCommitID string
 	for _, r := range results {
 		if r.status == http.StatusOK {
@@ -361,7 +370,7 @@ func TestKafka_DuplicatePublish_HandlersAreIdempotent(t *testing.T) {
 	// confirm baseline state
 	require.Equal(t, 1, neo4jCountNodes(t, env.neo4jDriver, repo.ID, commit2.ID))
 
-	// insert duplicate outbox events for both CommitCreated and BranchHeadMoved
+	// insert duplicate outbox events
 	_, err := env.pool.Exec(context.Background(), `
 		INSERT INTO outbox_events (id, event_type, payload, processed, created_at)
 		SELECT $1, event_type, payload, false, now() + interval '500 milliseconds'
@@ -374,7 +383,6 @@ func TestKafka_DuplicatePublish_HandlersAreIdempotent(t *testing.T) {
 	)
 	require.NoError(t, err, "insert duplicate outbox events for idempotency test")
 
-	// allow the producer to publish and the consumer to handle duplicates
 	env.waitForProjections(t, 30*time.Second)
 
 	// neo4j must still have exactly one node
@@ -400,18 +408,15 @@ func TestKafka_LinearHistory_AllCommitsReachNeo4j(t *testing.T) {
 
 	env.waitForProjections(t, 30*time.Second)
 
-	// all four commits must have Commit nodes
 	for _, id := range []string{root.ID, c1.ID, c2.ID, c3.ID} {
 		assertNeo4jNodeCount(t, env.neo4jDriver, repo.ID, id, 1, 30*time.Second)
 	}
 
-	// each non-root commit must have exactly one PARENT_OF edge
 	assertNeo4jEdgeCount(t, env.neo4jDriver, repo.ID, root.ID, 0, 30*time.Second)
 	assertNeo4jEdgeCount(t, env.neo4jDriver, repo.ID, c1.ID, 1, 30*time.Second)
 	assertNeo4jEdgeCount(t, env.neo4jDriver, repo.ID, c2.ID, 1, 30*time.Second)
 	assertNeo4jEdgeCount(t, env.neo4jDriver, repo.ID, c3.ID, 1, 30*time.Second)
 
-	// verify parent linkage correctness
 	assertNeo4jParentIDs(t, env.neo4jDriver, repo.ID, c1.ID, []string{root.ID}, 30*time.Second)
 	assertNeo4jParentIDs(t, env.neo4jDriver, repo.ID, c2.ID, []string{c1.ID}, 30*time.Second)
 	assertNeo4jParentIDs(t, env.neo4jDriver, repo.ID, c3.ID, []string{c2.ID}, 30*time.Second)

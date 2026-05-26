@@ -51,9 +51,24 @@ type EventBusConfig struct {
 }
 
 type OutboxConfig struct {
-	PollInterval time.Duration  `env:"POLL_INTERVAL" envDefault:"500ms"`
-	BatchSize    int            `env:"BATCH_SIZE"    envDefault:"100"`
-	EventBus     EventBusConfig `                                       envPrefix:"EVENTBUS_"`
+	// Source type: "polling" (default) or "debezium"
+	// polling: polls PostgreSQL outbox_events table at regular intervals
+	// debezium: reads CDC events from Kafka topic populated by Debezium connector
+	SourceType string `env:"SOURCE_TYPE" envDefault:"polling"`
+
+	// Polling source configuration (only used when SourceType=polling)
+	PollInterval time.Duration `env:"POLL_INTERVAL" envDefault:"500ms"`
+
+	// Batch size for all source types
+	BatchSize int `env:"BATCH_SIZE" envDefault:"100"`
+
+	// Debezium source configuration (only used when SourceType=debezium)
+	DebeziumBrokers string `env:"DEBEZIUM_BROKERS"` // comma-separated, e.g. "kafka-1:9092,kafka-2:9092"
+	DebeziumTopic   string `env:"DEBEZIUM_TOPIC"    envDefault:"verge.outbox.events"`
+	DebeziumGroupID string `env:"DEBEZIUM_GROUP_ID" envDefault:"verge-worker"`
+
+	// EventBus configuration (optional, for publishing to external consumers)
+	EventBus EventBusConfig `envPrefix:"EVENTBUS_"`
 }
 
 // only read when Outbox.EventBus.Enabled = true and Outbox.EventBus.Type = "kafka"
@@ -119,6 +134,20 @@ func validateStorage(sl validator.StructLevel) {
 
 func validateOutbox(sl validator.StructLevel) {
 	o := sl.Current().Interface().(OutboxConfig)
+
+	if o.SourceType != "polling" && o.SourceType != "debezium" {
+		sl.ReportError(o.SourceType, "SourceType", "sourceType", "invalid-source-type", "")
+	}
+
+	if o.SourceType == "debezium" && o.DebeziumBrokers == "" {
+		sl.ReportError(
+			o.DebeziumBrokers,
+			"DebeziumBrokers",
+			"debeziumBrokers",
+			"required-for-debezium",
+			"",
+		)
+	}
 
 	if o.EventBus.Enabled && o.EventBus.Type == "" {
 		sl.ReportError(o.EventBus.Type, "EventBus.Type", "type", "required-if-enabled", "")

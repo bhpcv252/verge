@@ -33,10 +33,15 @@ var knownVergeKeys = map[string]struct{}{
 	"VERGE_STORAGE_NEO4J_ENABLED": {},
 	"VERGE_STORAGE_NEO4J_URL":     {},
 
-	"VERGE_OUTBOX_POLL_INTERVAL":    {},
-	"VERGE_OUTBOX_BATCH_SIZE":       {},
-	"VERGE_OUTBOX_EVENTBUS_ENABLED": {},
-	"VERGE_OUTBOX_EVENTBUS_TYPE":    {},
+	// Outbox worker
+	"VERGE_OUTBOX_SOURCE_TYPE":       {}, // NEW: "polling" or "debezium"
+	"VERGE_OUTBOX_POLL_INTERVAL":     {},
+	"VERGE_OUTBOX_BATCH_SIZE":        {},
+	"VERGE_OUTBOX_EVENTBUS_ENABLED":  {},
+	"VERGE_OUTBOX_EVENTBUS_TYPE":     {},
+	"VERGE_OUTBOX_DEBEZIUM_BROKERS":  {}, // NEW
+	"VERGE_OUTBOX_DEBEZIUM_TOPIC":    {}, // NEW
+	"VERGE_OUTBOX_DEBEZIUM_GROUP_ID": {}, // NEW
 
 	"VERGE_KAFKA_BROKERS": {},
 	"VERGE_KAFKA_TOPIC":   {},
@@ -143,17 +148,37 @@ func TestLoad_OutboxDefaults(t *testing.T) {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 
+	if cfg.Outbox.SourceType != "polling" {
+		t.Errorf("Outbox.SourceType default: want %q, got %q", "polling", cfg.Outbox.SourceType)
+	}
 	if cfg.Outbox.PollInterval != 500*time.Millisecond {
 		t.Errorf("Outbox.PollInterval default: want 500ms, got %s", cfg.Outbox.PollInterval)
 	}
 	if cfg.Outbox.BatchSize != 100 {
 		t.Errorf("Outbox.BatchSize default: want 100, got %d", cfg.Outbox.BatchSize)
 	}
+	if cfg.Outbox.DebeziumTopic != "verge.outbox.events" {
+		t.Errorf(
+			"Outbox.DebeziumTopic default: want %q, got %q",
+			"verge.outbox.events",
+			cfg.Outbox.DebeziumTopic,
+		)
+	}
+	if cfg.Outbox.DebeziumGroupID != "verge-worker" {
+		t.Errorf(
+			"Outbox.DebeziumGroupID default: want %q, got %q",
+			"verge-worker",
+			cfg.Outbox.DebeziumGroupID,
+		)
+	}
+	if cfg.Outbox.DebeziumBrokers != "" {
+		t.Errorf("Outbox.DebeziumBrokers default: want empty, got %q", cfg.Outbox.DebeziumBrokers)
+	}
 	if cfg.Outbox.EventBus.Enabled {
 		t.Error("Outbox.EventBus.Enabled default: want false, got true")
 	}
 	if cfg.Outbox.EventBus.Type != "kafka" {
-		t.Errorf("Outbox.EventBus.Type default: want \"kafka\", got %q", cfg.Outbox.EventBus.Type)
+		t.Errorf("Outbox.EventBus.Type default: want %q, got %q", "kafka", cfg.Outbox.EventBus.Type)
 	}
 }
 
@@ -595,6 +620,138 @@ func TestLoad_OutboxInvalidBatchSize(t *testing.T) {
 	}
 }
 
+// outbox source type
+
+func TestLoad_OutboxSourceType_DefaultIsPolling(t *testing.T) {
+	clearVergeEnv(t)
+	setEnv(t, map[string]string{
+		"VERGE_STORAGE_POSTGRES_URL": "postgres://u:p@localhost:5432/db?sslmode=disable",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Outbox.SourceType != "polling" {
+		t.Errorf("Outbox.SourceType default: want %q, got %q", "polling", cfg.Outbox.SourceType)
+	}
+}
+
+func TestLoad_OutboxSourceType_Polling_IsValid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_SOURCE_TYPE"] = "polling"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("source_type=polling should be valid, got: %v", err)
+	}
+}
+
+func TestLoad_OutboxSourceType_Debezium_WithBrokers_IsValid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_SOURCE_TYPE"] = "debezium"
+	e["VERGE_OUTBOX_DEBEZIUM_BROKERS"] = "kafka:9092"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("source_type=debezium with brokers set should be valid, got: %v", err)
+	}
+}
+
+func TestLoad_OutboxSourceType_Debezium_WithoutBrokers_IsInvalid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_SOURCE_TYPE"] = "debezium"
+	// VERGE_OUTBOX_DEBEZIUM_BROKERS deliberately omitted
+	setEnv(t, e)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when source_type=debezium but DEBEZIUM_BROKERS is empty")
+	}
+}
+
+func TestLoad_OutboxSourceType_Invalid_IsRejected(t *testing.T) {
+	for _, invalid := range []string{"kafka", "rabbitmq", "cdc", "none", "POLLING"} {
+		invalid := invalid
+		t.Run("type="+invalid, func(t *testing.T) {
+			clearVergeEnv(t)
+			e := baseEnv()
+			e["VERGE_OUTBOX_SOURCE_TYPE"] = invalid
+			setEnv(t, e)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("source_type=%q should be invalid, expected an error", invalid)
+			}
+		})
+	}
+}
+
+// debezium config
+
+func TestLoad_OutboxDebezium_CustomBrokers(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_SOURCE_TYPE"] = "debezium"
+	e["VERGE_OUTBOX_DEBEZIUM_BROKERS"] = "kafka-1:9092,kafka-2:9092"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Outbox.DebeziumBrokers != "kafka-1:9092,kafka-2:9092" {
+		t.Errorf("Outbox.DebeziumBrokers: want %q, got %q",
+			"kafka-1:9092,kafka-2:9092", cfg.Outbox.DebeziumBrokers)
+	}
+}
+
+func TestLoad_OutboxDebezium_CustomTopic(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_SOURCE_TYPE"] = "debezium"
+	e["VERGE_OUTBOX_DEBEZIUM_BROKERS"] = "kafka:9092"
+	e["VERGE_OUTBOX_DEBEZIUM_TOPIC"] = "my.custom.topic"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Outbox.DebeziumTopic != "my.custom.topic" {
+		t.Errorf(
+			"Outbox.DebeziumTopic: want %q, got %q",
+			"my.custom.topic",
+			cfg.Outbox.DebeziumTopic,
+		)
+	}
+}
+
+func TestLoad_OutboxDebezium_CustomGroupID(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OUTBOX_SOURCE_TYPE"] = "debezium"
+	e["VERGE_OUTBOX_DEBEZIUM_BROKERS"] = "kafka:9092"
+	e["VERGE_OUTBOX_DEBEZIUM_GROUP_ID"] = "my-consumer-group"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Outbox.DebeziumGroupID != "my-consumer-group" {
+		t.Errorf("Outbox.DebeziumGroupID: want %q, got %q",
+			"my-consumer-group", cfg.Outbox.DebeziumGroupID)
+	}
+}
+
+// outbox eventbus config
+
 func TestLoad_OutboxEventBus_EnabledKafka_IsValid(t *testing.T) {
 	clearVergeEnv(t)
 	e := baseEnv()
@@ -627,6 +784,8 @@ func TestLoad_OutboxEventBus_EnabledCustomType_IsAllowed(t *testing.T) {
 }
 
 func TestLoad_OutboxEventBus_EnabledEmptyType_IsInvalid(t *testing.T) {
+	// Construct the config directly to test validation in isolation.
+	// SourceType must be valid to isolate the EventBus.Type check.
 	cfg := &Config{
 		Server: Server{
 			HTTP: HTTP{Enabled: true, Port: 8080},
@@ -636,11 +795,12 @@ func TestLoad_OutboxEventBus_EnabledEmptyType_IsInvalid(t *testing.T) {
 			Postgres: PGConfig{URL: "postgres://u:p@localhost:5432/db?sslmode=disable"},
 		},
 		Outbox: OutboxConfig{
+			SourceType:   "polling", // must be valid to reach EventBus check
 			PollInterval: 500 * time.Millisecond,
 			BatchSize:    100,
 			EventBus: EventBusConfig{
 				Enabled: true,
-				Type:    "", // explicitly empty
+				Type:    "", // explicitly empty - this is what we're testing
 			},
 		},
 	}
@@ -712,6 +872,7 @@ func TestLoad_FullValidConfig(t *testing.T) {
 		"VERGE_STORAGE_NEO4J_ENABLED":    "true",
 		"VERGE_STORAGE_NEO4J_URL":        "bolt://localhost:7687",
 
+		"VERGE_OUTBOX_SOURCE_TYPE":      "polling",
 		"VERGE_OUTBOX_POLL_INTERVAL":    "250ms",
 		"VERGE_OUTBOX_BATCH_SIZE":       "200",
 		"VERGE_OUTBOX_EVENTBUS_ENABLED": "true",
@@ -755,6 +916,9 @@ func TestLoad_FullValidConfig(t *testing.T) {
 	}
 
 	// outbox
+	if cfg.Outbox.SourceType != "polling" {
+		t.Errorf("Outbox.SourceType: want %q, got %q", "polling", cfg.Outbox.SourceType)
+	}
 	if cfg.Outbox.PollInterval != 250*time.Millisecond {
 		t.Errorf("Outbox.PollInterval: want 250ms, got %s", cfg.Outbox.PollInterval)
 	}
@@ -765,15 +929,55 @@ func TestLoad_FullValidConfig(t *testing.T) {
 		t.Error("Outbox.EventBus.Enabled: want true, got false")
 	}
 	if cfg.Outbox.EventBus.Type != "kafka" {
-		t.Errorf("Outbox.EventBus.Type: want \"kafka\", got %q", cfg.Outbox.EventBus.Type)
+		t.Errorf("Outbox.EventBus.Type: want %q, got %q", "kafka", cfg.Outbox.EventBus.Type)
 	}
 
 	// kafka
 	if cfg.Kafka.Brokers != "kafka:9092" {
-		t.Errorf("Kafka.Brokers: want \"kafka:9092\", got %q", cfg.Kafka.Brokers)
+		t.Errorf("Kafka.Brokers: want %q, got %q", "kafka:9092", cfg.Kafka.Brokers)
 	}
 	if cfg.Kafka.Topic != "verge.prod.events" {
-		t.Errorf("Kafka.Topic: want \"verge.prod.events\", got %q", cfg.Kafka.Topic)
+		t.Errorf("Kafka.Topic: want %q, got %q", "verge.prod.events", cfg.Kafka.Topic)
+	}
+}
+
+func TestLoad_FullValidConfig_Debezium(t *testing.T) {
+	clearVergeEnv(t)
+	setEnv(t, map[string]string{
+		"VERGE_SERVER_HTTP_ENABLED": "true",
+		"VERGE_SERVER_HTTP_PORT":    "8080",
+
+		"VERGE_STORAGE_POSTGRES_URL": "postgres://u:p@db:5432/mydb?sslmode=disable",
+
+		"VERGE_OUTBOX_SOURCE_TYPE":       "debezium",
+		"VERGE_OUTBOX_BATCH_SIZE":        "1000",
+		"VERGE_OUTBOX_DEBEZIUM_BROKERS":  "kafka-1:9092,kafka-2:9092",
+		"VERGE_OUTBOX_DEBEZIUM_TOPIC":    "verge.outbox.events",
+		"VERGE_OUTBOX_DEBEZIUM_GROUP_ID": "verge-worker-prod",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Outbox.SourceType != "debezium" {
+		t.Errorf("Outbox.SourceType: want %q, got %q", "debezium", cfg.Outbox.SourceType)
+	}
+	if cfg.Outbox.BatchSize != 1000 {
+		t.Errorf("Outbox.BatchSize: want 1000, got %d", cfg.Outbox.BatchSize)
+	}
+	if cfg.Outbox.DebeziumBrokers != "kafka-1:9092,kafka-2:9092" {
+		t.Errorf("Outbox.DebeziumBrokers: want %q, got %q",
+			"kafka-1:9092,kafka-2:9092", cfg.Outbox.DebeziumBrokers)
+	}
+	if cfg.Outbox.DebeziumTopic != "verge.outbox.events" {
+		t.Errorf("Outbox.DebeziumTopic: want %q, got %q",
+			"verge.outbox.events", cfg.Outbox.DebeziumTopic)
+	}
+	if cfg.Outbox.DebeziumGroupID != "verge-worker-prod" {
+		t.Errorf("Outbox.DebeziumGroupID: want %q, got %q",
+			"verge-worker-prod", cfg.Outbox.DebeziumGroupID)
 	}
 }
 
