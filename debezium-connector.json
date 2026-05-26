@@ -1,0 +1,39 @@
+{
+  "name": "verge-outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "verge",
+    "database.password": "changeme",
+    "database.dbname": "verge",
+    "database.server.name": "verge",
+    
+    "table.include.list": "public.outbox_events",
+    "plugin.name": "pgoutput",
+    "publication.autocreate.mode": "filtered",
+    
+    "topic.prefix": "verge.outbox",
+    "topic.creation.default.replication.factor": "3",
+    "topic.creation.default.partitions": "10",
+    
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones": "true",
+    "transforms.unwrap.delete.handling.mode": "none",
+    
+    "snapshot.mode": "initial",
+    "time.precision.mode": "connect",
+    "decimal.handling.mode": "double",
+    
+    "heartbeat.interval.ms": "10000",
+    "heartbeat.action.query": "INSERT INTO heartbeat (ts) VALUES (NOW()) ON CONFLICT DO NOTHING"
+  }
+}

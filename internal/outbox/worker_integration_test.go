@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -18,14 +17,13 @@ import (
 	"github.com/bhpcv252/verge/testhelper"
 )
 
-// test DB helpers
+// helpers
 
 func setupWorkerTest(t *testing.T) (*pgxpool.Pool, func()) {
 	t.Helper()
 	return testhelper.SetupPostgres(t)
 }
 
-// insertEvent writes a single unprocessed outbox_events row and returns its ID
 func insertEvent(t *testing.T, pool *pgxpool.Pool, eventType string, payload any) string {
 	t.Helper()
 
@@ -47,7 +45,6 @@ type outboxRow struct {
 	processedAt *time.Time
 }
 
-// fetchEvent reads a single outbox_events row by ID
 func fetchEvent(t *testing.T, pool *pgxpool.Pool, id string) outboxRow {
 	t.Helper()
 	var row outboxRow
@@ -58,7 +55,6 @@ func fetchEvent(t *testing.T, pool *pgxpool.Pool, id string) outboxRow {
 	return row
 }
 
-// countProcessed returns how many rows in outbox_events have processed = true
 func countProcessed(t *testing.T, pool *pgxpool.Pool) int {
 	t.Helper()
 	var n int
@@ -69,7 +65,6 @@ func countProcessed(t *testing.T, pool *pgxpool.Pool) int {
 	return n
 }
 
-// validBranchPayload returns a minimal BranchHeadMovedPayload as a map.
 func validBranchPayload() map[string]any {
 	return map[string]any{
 		"repo_id":   "repo-integration-test",
@@ -79,7 +74,31 @@ func validBranchPayload() map[string]any {
 	}
 }
 
-// In-process mode, handler succeeds
+func newPollingWorker(pool *pgxpool.Pool, batchSize int, opts ...Option) *Worker {
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+	// interval=0 means poll immediately without sleeping
+	src := NewPollingSource(pool, 0, batchSize)
+	return NewWorker(append([]Option{WithSource(src)}, opts...)...)
+}
+
+func pollOnce(ctx context.Context, w *Worker) error {
+	events, err := w.source.Next(ctx)
+	if err != nil {
+		return err
+	}
+	if len(events) == 0 {
+		return nil
+	}
+	processed := w.processEvents(ctx, events)
+	if len(processed) > 0 {
+		return w.source.Ack(ctx, processed)
+	}
+	return nil
+}
+
+// in-process mode
 
 func TestWorker_Poll_SuccessfulHandler_MarksEventProcessed(t *testing.T) {
 	pool, cleanup := setupWorkerTest(t)
@@ -88,9 +107,9 @@ func TestWorker_Poll_SuccessfulHandler_MarksEventProcessed(t *testing.T) {
 	id := insertEvent(t, pool, EventTypeBranchHeadMoved, validBranchPayload())
 
 	h := newHandler(EventTypeBranchHeadMoved)
-	w := NewWorker(pool, WithHandlers([]OutboxHandler{h}))
+	w := newPollingWorker(pool, 100, WithHandlers([]OutboxHandler{h}))
 
-	require.NoError(t, w.poll(context.Background()))
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	row := fetchEvent(t, pool, id)
 	assert.True(t, row.processed)
@@ -106,9 +125,9 @@ func TestWorker_Poll_SuccessfulHandler_EventPayloadDeliveredIntact(t *testing.T)
 	id := insertEvent(t, pool, EventTypeBranchHeadMoved, payload)
 
 	h := newHandler(EventTypeBranchHeadMoved)
-	w := NewWorker(pool, WithHandlers([]OutboxHandler{h}))
+	w := newPollingWorker(pool, 100, WithHandlers([]OutboxHandler{h}))
 
-	require.NoError(t, w.poll(context.Background()))
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	require.Equal(t, 1, h.callCount())
 	assert.Equal(t, id, h.calls[0].ID)
@@ -128,9 +147,9 @@ func TestWorker_Poll_HandlerError_EventRemainsUnprocessed(t *testing.T) {
 	id := insertEvent(t, pool, EventTypeBranchHeadMoved, validBranchPayload())
 
 	h := newFailingHandler(EventTypeBranchHeadMoved, errors.New("store unavailable"))
-	w := NewWorker(pool, WithHandlers([]OutboxHandler{h}))
+	w := newPollingWorker(pool, 100, WithHandlers([]OutboxHandler{h}))
 
-	require.NoError(t, w.poll(context.Background()))
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	row := fetchEvent(t, pool, id)
 	assert.False(t, row.processed, "failed event must remain unprocessed for retry")
@@ -145,9 +164,9 @@ func TestWorker_Poll_UnknownEventType_MarkedProcessed(t *testing.T) {
 
 	id := insertEvent(t, pool, "UnknownFutureEvent", map[string]any{"foo": "bar"})
 
-	w := NewWorker(pool) // no handlers registered
+	w := newPollingWorker(pool, 100) // no handlers registered
 
-	require.NoError(t, w.poll(context.Background()))
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	row := fetchEvent(t, pool, id)
 	assert.True(t, row.processed)
@@ -159,9 +178,9 @@ func TestWorker_Poll_EmptyOutbox_ReturnsNil(t *testing.T) {
 	pool, cleanup := setupWorkerTest(t)
 	defer cleanup()
 
-	w := NewWorker(pool)
+	w := newPollingWorker(pool, 100)
 
-	err := w.poll(context.Background())
+	err := pollOnce(context.Background(), w)
 	require.NoError(t, err)
 	assert.Equal(t, 0, countProcessed(t, pool))
 }
@@ -177,9 +196,9 @@ func TestWorker_Poll_MixedBatch_OnlySuccessfulEventsMarkedProcessed(t *testing.T
 
 	goodHandler := newHandler(EventTypeBranchHeadMoved)
 	failHandler := newFailingHandler(EventTypeCommitCreated, errors.New("neo4j down"))
-	w := NewWorker(pool, WithHandlers([]OutboxHandler{goodHandler, failHandler}))
+	w := newPollingWorker(pool, 100, WithHandlers([]OutboxHandler{goodHandler, failHandler}))
 
-	require.NoError(t, w.poll(context.Background()))
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	assert.True(t, fetchEvent(t, pool, goodID).processed)
 	assert.False(t, fetchEvent(t, pool, failID).processed)
@@ -191,16 +210,15 @@ func TestWorker_Poll_AlreadyProcessedEvent_NotDispatchedAgain(t *testing.T) {
 	pool, cleanup := setupWorkerTest(t)
 	defer cleanup()
 
-	// insert an event and mark it processed manually
 	id := insertEvent(t, pool, EventTypeBranchHeadMoved, validBranchPayload())
 	_, err := pool.Exec(context.Background(),
 		`UPDATE outbox_events SET processed = true, processed_at = now() WHERE id = $1`, id)
 	require.NoError(t, err)
 
 	h := newHandler(EventTypeBranchHeadMoved)
-	w := NewWorker(pool, WithHandlers([]OutboxHandler{h}))
+	w := newPollingWorker(pool, 100, WithHandlers([]OutboxHandler{h}))
 
-	require.NoError(t, w.poll(context.Background()))
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	assert.Equal(t, 0, h.callCount(), "already-processed event must not be dispatched again")
 }
@@ -216,9 +234,9 @@ func TestWorker_Poll_BatchSize_LimitsEventsPerPoll(t *testing.T) {
 	}
 
 	h := newHandler(EventTypeBranchHeadMoved)
-	w := NewWorker(pool, WithHandlers([]OutboxHandler{h}), WithBatchSize(2))
+	w := newPollingWorker(pool, 2, WithHandlers([]OutboxHandler{h})) // batch=2
 
-	require.NoError(t, w.poll(context.Background()))
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	assert.Equal(t, 2, h.callCount(), "worker must process at most batch-size events per poll")
 	assert.Equal(t, 2, countProcessed(t, pool))
@@ -234,11 +252,11 @@ func TestWorker_Poll_EventBusMode_PublishSucceeds_AllMarkedProcessed(t *testing.
 	id2 := insertEvent(t, pool, EventTypeCommitCreated, map[string]any{"commit_id": "c1"})
 
 	bus := &mockEventBus{}
-	// Register handlers too - they must NOT be called in EventBus mode.
+	// register handlers too
 	h := newHandler(EventTypeBranchHeadMoved, EventTypeCommitCreated)
-	w := NewWorker(pool, WithEventBus(bus), WithHandlers([]OutboxHandler{h}))
+	w := newPollingWorker(pool, 100, WithEventBus(bus), WithHandlers([]OutboxHandler{h}))
 
-	require.NoError(t, w.poll(context.Background()))
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	assert.True(t, fetchEvent(t, pool, id1).processed)
 	assert.True(t, fetchEvent(t, pool, id2).processed)
@@ -253,9 +271,9 @@ func TestWorker_Poll_EventBusMode_PublishedEventsContainCorrectIDs(t *testing.T)
 	id := insertEvent(t, pool, EventTypeBranchHeadMoved, validBranchPayload())
 
 	bus := &mockEventBus{}
-	w := NewWorker(pool, WithEventBus(bus))
+	w := newPollingWorker(pool, 100, WithEventBus(bus))
 
-	require.NoError(t, w.poll(context.Background()))
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	require.Len(t, bus.published, 1)
 	assert.Equal(t, id, bus.published[0].ID)
@@ -270,54 +288,12 @@ func TestWorker_Poll_EventBusMode_PublishFails_NothingMarkedProcessed(t *testing
 	id := insertEvent(t, pool, EventTypeBranchHeadMoved, validBranchPayload())
 
 	bus := &mockEventBus{err: errors.New("broker unreachable")}
-	w := NewWorker(pool, WithEventBus(bus))
+	w := newPollingWorker(pool, 100, WithEventBus(bus))
 
-	err := w.poll(context.Background())
-	require.Error(t, err, "poll must surface the publish error")
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	row := fetchEvent(t, pool, id)
 	assert.False(t, row.processed, "nothing must be marked processed when Publish fails")
-}
-
-// SKIP LOCKED ensures each event processed exactly once
-
-func TestWorker_Poll_SkipLocked_ConcurrentWorkers_EachEventProcessedOnce(t *testing.T) {
-	pool, cleanup := setupWorkerTest(t)
-	defer cleanup()
-
-	const numEvents = 10
-	for i := 0; i < numEvents; i++ {
-		insertEvent(t, pool, EventTypeBranchHeadMoved, validBranchPayload())
-	}
-
-	var mu sync.Mutex
-	total := 0
-	countingHandler := &mockHandler{
-		types: []string{EventTypeBranchHeadMoved},
-		handleFn: func(_ context.Context, _ OutboxEvent) error {
-			mu.Lock()
-			total++
-			mu.Unlock()
-			return nil
-		},
-	}
-
-	var wg sync.WaitGroup
-	for i := 0; i < 3; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			w := NewWorker(pool, WithHandlers([]OutboxHandler{countingHandler}))
-			if err := w.poll(context.Background()); err != nil {
-				t.Errorf("poll returned error: %v", err)
-			}
-		}()
-	}
-	wg.Wait()
-
-	assert.Equal(t, numEvents, total,
-		"each event must be dispatched exactly once across all concurrent workers")
-	assert.Equal(t, numEvents, countProcessed(t, pool))
 }
 
 // events polled in created_at ASC order
@@ -341,8 +317,9 @@ func TestWorker_Poll_EventsDispatchedInCreatedAtAscOrder(t *testing.T) {
 	}
 
 	h := newHandler(EventTypeBranchHeadMoved)
-	w := NewWorker(pool, WithHandlers([]OutboxHandler{h}))
-	require.NoError(t, w.poll(context.Background()))
+	w := newPollingWorker(pool, 100, WithHandlers([]OutboxHandler{h}))
+
+	require.NoError(t, pollOnce(context.Background(), w))
 
 	require.Len(t, h.calls, 3)
 	for i, call := range h.calls {

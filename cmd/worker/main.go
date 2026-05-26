@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/bhpcv252/verge/internal/config"
 	"github.com/bhpcv252/verge/internal/outbox"
 	"github.com/bhpcv252/verge/internal/outbox/eventbus/kafka"
@@ -41,14 +43,16 @@ func run() error {
 		cancel()
 	}()
 
-	// postgreSQL
-	pool, err := postgres.NewPool(ctx, cfg.Storage.Postgres.URL)
-	if err != nil {
-		return fmt.Errorf("postgres: %w", err)
+	var pool *pgxpool.Pool
+	if cfg.Outbox.SourceType == "polling" || cfg.Storage.Neo4j.Enabled ||
+		cfg.Storage.Redis.Enabled {
+		pool, err = postgres.NewPool(ctx, cfg.Storage.Postgres.URL)
+		if err != nil {
+			return fmt.Errorf("postgres: %w", err)
+		}
+		defer pool.Close()
 	}
-	defer pool.Close()
 
-	// build handlers
 	var handlers []outbox.OutboxHandler
 
 	if cfg.Storage.Neo4j.Enabled {
@@ -74,14 +78,44 @@ func run() error {
 		log.Println("outbox worker: Redis heal handler registered (BranchHeadMoved)")
 	}
 
-	// build worker options
-	opts := []outbox.Option{
-		outbox.WithHandlers(handlers),
-		outbox.WithInterval(cfg.Outbox.PollInterval),
-		outbox.WithBatchSize(cfg.Outbox.BatchSize),
+	var source outbox.EventSource
+
+	switch cfg.Outbox.SourceType {
+	case "polling":
+		if pool == nil {
+			return fmt.Errorf("polling source requires PostgreSQL connection")
+		}
+		source = outbox.NewPollingSource(pool, cfg.Outbox.PollInterval, cfg.Outbox.BatchSize)
+		log.Printf("outbox worker: using polling source (interval=%s, batch=%d)",
+			cfg.Outbox.PollInterval, cfg.Outbox.BatchSize)
+
+	case "debezium":
+		if cfg.Outbox.DebeziumBrokers == "" {
+			return fmt.Errorf("VERGE_OUTBOX_DEBEZIUM_BROKERS is required when SOURCE_TYPE=debezium")
+		}
+		brokers := strings.Split(cfg.Outbox.DebeziumBrokers, ",")
+		source = outbox.NewDebeziumSource(outbox.DebeziumConfig{
+			Brokers: brokers,
+			Topic:   cfg.Outbox.DebeziumTopic,
+			GroupID: cfg.Outbox.DebeziumGroupID,
+			Batch:   cfg.Outbox.BatchSize,
+		})
+		log.Printf("outbox worker: using debezium source (topic=%s, group=%s, brokers=%v)",
+			cfg.Outbox.DebeziumTopic, cfg.Outbox.DebeziumGroupID, brokers)
+
+	default:
+		return fmt.Errorf(
+			"unknown source type: %s (valid: polling, debezium)",
+			cfg.Outbox.SourceType,
+		)
 	}
 
-	// EventBus
+	// build worker options
+	opts := []outbox.Option{
+		outbox.WithSource(source),
+		outbox.WithHandlers(handlers),
+	}
+
 	if cfg.Outbox.EventBus.Enabled {
 		if cfg.Outbox.EventBus.Type != "kafka" {
 			return fmt.Errorf("unsupported event bus type: %q", cfg.Outbox.EventBus.Type)
@@ -101,12 +135,13 @@ func run() error {
 		log.Printf("outbox worker: EventBus mode - publishing to Kafka topic %q", cfg.Kafka.Topic)
 	}
 
-	// run
-	log.Printf("outbox worker: poll_interval=%s batch_size=%d",
-		cfg.Outbox.PollInterval, cfg.Outbox.BatchSize)
+	// run worker
+	log.Printf("outbox worker: batch_size=%d", cfg.Outbox.BatchSize)
 
-	worker := outbox.NewWorker(pool, opts...)
-	worker.Run(ctx) // blocks until ctx cancelled
+	worker := outbox.NewWorker(opts...)
+	if err := worker.Run(ctx); err != nil {
+		return fmt.Errorf("worker error: %w", err)
+	}
 
 	return nil
 }

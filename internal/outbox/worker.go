@@ -2,23 +2,21 @@ package outbox
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Worker struct {
-	db       *pgxpool.Pool
+	source   EventSource
 	handlers []OutboxHandler
 	bus      EventBus // nil = in-process dispatch
-	interval time.Duration
-	batch    int
 }
 
 type Option func(*Worker)
+
+func WithSource(source EventSource) Option {
+	return func(w *Worker) { w.source = source }
+}
 
 func WithHandlers(handlers []OutboxHandler) Option {
 	return func(w *Worker) { w.handlers = handlers }
@@ -28,126 +26,86 @@ func WithEventBus(bus EventBus) Option {
 	return func(w *Worker) { w.bus = bus }
 }
 
-func WithInterval(d time.Duration) Option {
-	return func(w *Worker) {
-		if d > 0 {
-			w.interval = d
-		}
-	}
-}
-
-func WithBatchSize(n int) Option {
-	return func(w *Worker) {
-		if n > 0 {
-			w.batch = n
-		}
-	}
-}
-
-func NewWorker(db *pgxpool.Pool, opts ...Option) *Worker {
-	w := &Worker{
-		db:       db,
-		interval: 500 * time.Millisecond,
-		batch:    100,
-	}
+func NewWorker(opts ...Option) *Worker {
+	w := &Worker{}
 	for _, opt := range opts {
 		opt(w)
 	}
 	return w
 }
 
-func (w *Worker) Run(ctx context.Context) {
-	log.Println("outbox worker: started")
-	ticker := time.NewTicker(w.interval)
-	defer ticker.Stop()
+func (w *Worker) Run(ctx context.Context) error {
+	if w.source == nil {
+		return fmt.Errorf("worker: source is required (use WithSource)")
+	}
+
+	log.Printf("outbox worker: starting with source=%s", w.source.Name())
+
+	if err := w.source.Start(ctx); err != nil {
+		return fmt.Errorf("start source: %w", err)
+	}
+	defer func() {
+		if err := w.source.Close(); err != nil {
+			log.Printf("outbox worker: close source error: %v", err)
+		}
+	}()
 
 	for {
-		select {
-		case <-ctx.Done():
-			log.Println("outbox worker: stopped")
-			return
-		case <-ticker.C:
-			if err := w.poll(ctx); err != nil {
-				log.Printf("outbox worker: poll error: %v", err)
+		// fetch next batch of events
+		events, err := w.source.Next(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Println("outbox worker: stopped")
+				return nil
+			}
+			log.Printf("outbox worker: source error: %v", err)
+			continue
+		}
+
+		if len(events) == 0 {
+			continue
+		}
+
+		log.Printf("outbox worker: processing %d events", len(events))
+
+		// process events
+		processed := w.processEvents(ctx, events)
+
+		// acknowledge successfully processed events
+		if len(processed) > 0 {
+			if err := w.source.Ack(ctx, processed); err != nil {
+				log.Printf("outbox worker: ack error: %v", err)
+				// continue even if ack fails, source will retry on next batch
 			}
 		}
 	}
 }
 
-func (w *Worker) poll(ctx context.Context) error {
-	tx, err := w.db.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	rows, err := tx.Query(ctx, `
-		SELECT id, event_type, payload, created_at
-		FROM outbox_events
-		WHERE processed = false
-		ORDER BY created_at ASC
-		LIMIT $1
-		FOR UPDATE SKIP LOCKED`,
-		w.batch,
-	)
-	if err != nil {
-		return fmt.Errorf("query outbox: %w", err)
-	}
-
-	var events []OutboxEvent
-	for rows.Next() {
-		var e OutboxEvent
-		var payload []byte
-		if err := rows.Scan(&e.ID, &e.EventType, &payload, &e.CreatedAt); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan outbox row: %w", err)
-		}
-		e.Payload = json.RawMessage(payload)
-		events = append(events, e)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("outbox rows: %w", err)
-	}
-
-	if len(events) == 0 {
-		return tx.Commit(ctx)
-	}
-
+func (w *Worker) processEvents(ctx context.Context, events []OutboxEvent) []string {
 	var processed []string
 
 	if w.bus != nil {
+		// EventBus mode: publish all events to external broker
 		if err := w.bus.Publish(ctx, events); err != nil {
-			return fmt.Errorf("eventbus publish: %w", err)
+			log.Printf("outbox worker: eventbus publish error: %v", err)
+			return processed
 		}
 		for _, e := range events {
 			processed = append(processed, e.ID)
 		}
 	} else {
+		// In-process mode: dispatch to registered handlers
 		for _, e := range events {
 			if err := w.dispatch(ctx, e); err != nil {
-				log.Printf("outbox worker: dispatch %s (%s) failed: %v", e.ID, e.EventType, err)
+				log.Printf("outbox worker: dispatch %s (%s) failed: %v",
+					e.ID, e.EventType, err)
 				continue
 			}
 			processed = append(processed, e.ID)
 		}
 	}
 
-	if len(processed) == 0 {
-		return tx.Commit(ctx)
-	}
-
-	_, err = tx.Exec(ctx, `
-		UPDATE outbox_events
-		SET processed = true, processed_at = now()
-		WHERE id = ANY($1)`,
-		processed,
-	)
-	if err != nil {
-		return fmt.Errorf("mark processed: %w", err)
-	}
-
-	return tx.Commit(ctx)
+	return processed
 }
 
 // dispatch calls every registered handler whose EventTypes matches this event
