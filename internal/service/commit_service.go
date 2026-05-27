@@ -23,7 +23,6 @@ type CommitStore interface {
 type CommitService struct {
 	store     CommitStore
 	repoStore RepoStore
-	// TODO: outboxStore for writing outbox events
 }
 
 func NewCommitService(store CommitStore, repoStore RepoStore) *CommitService {
@@ -36,7 +35,6 @@ func NewCommitService(store CommitStore, repoStore RepoStore) *CommitService {
 type CreateCommitInput struct {
 	RepoID         string
 	ParentIDs      []string
-	ExpectedHead   string // optional
 	DataPointer    domain.DataPointer
 	Message        string
 	Author         string

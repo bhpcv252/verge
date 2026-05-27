@@ -221,7 +221,7 @@ func TestOutbox_Redis_IdempotentHeal_ReplayIsSafe(t *testing.T) {
 		INSERT INTO outbox_events (id, event_type, payload, processed, created_at)
 		SELECT $1, event_type, payload, false, now() + interval '1 second'
 		FROM outbox_events
-		WHERE event_type IN ('BranchHeadMoved', 'MergeCompleted')
+		WHERE event_type = 'BranchHeadMoved'
 		  AND payload->>'repo_id' = $2
 		LIMIT 1`,
 		uuid.New().String(),

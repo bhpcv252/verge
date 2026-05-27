@@ -79,7 +79,6 @@ func TestCreateCommit_ValidRequest_CallsServiceWithCorrectInput(t *testing.T) {
 		Message:        "test commit",
 		Author:         "alice@example.com",
 		IdempotencyKey: "key123",
-		ExpectedHead:   "parent1",
 	})
 
 	require.NoError(t, err)
@@ -93,7 +92,6 @@ func TestCreateCommit_ValidRequest_CallsServiceWithCorrectInput(t *testing.T) {
 	assert.Equal(t, "test commit", captured.Message)
 	assert.Equal(t, "alice@example.com", captured.Author)
 	assert.Equal(t, "key123", captured.IdempotencyKey)
-	assert.Equal(t, "parent1", captured.ExpectedHead)
 }
 
 func TestCreateCommit_MissingRepoID_ReturnsInvalidArgument(t *testing.T) {

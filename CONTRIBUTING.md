@@ -8,7 +8,7 @@ Thanks for wanting to contribute to Verge, a version control system for non-code
 
 As this project is in early development phase, the following help is much appreciated.
 
-**Documentation** - The documentation is almost none currently, please feel free open issue to discuss and work on it.
+**Documentation** - If something is unclear, wrong, or missing, open an issue or a PR directly.
 
 **Feature requests** - open an issue and describe what you're trying to do and why the current API doesn't support it. Be specific about your use case. "I'm building X and I need Y because Z" is a lot more useful than a vague feature name.
 
@@ -27,7 +27,7 @@ Things most likely to get merged:
 - Bug fixes with a clear reproduction case
 - Documentation
 - New storage backend implementations that follow the pluggable backend interface
-- SDK contributions in TypeScript, Python, or Go (coordinate in an issue first so work isn't duplicated)
+- SDK contributions in TypeScript, Python, or Go.
 - Test coverage for existing flows
 
 ---
@@ -37,9 +37,9 @@ Things most likely to get merged:
 ### Prerequisites
 
 - **Go 1.25.0 or later** - Check with `go version`
-- **Docker & Docker Compose** - Required for running PostgreSQL, Redis, Neo4j, and build tools
-- **Git** - For version control
+- **Docker & Docker Compose** - Required for running PostgreSQL, Redis, Neo4j, Kafka, and build tools
 - **Make** - For running build commands
+- **Git** - For version control
 
 ### Initial setup
 
@@ -49,14 +49,14 @@ git clone https://github.com/bhpcv252/verge.git
 cd verge
 
 # Install git hooks (optional but recommended)
-# This runs lint, tests, and formatting before commits
+# Runs lint, tests, and formatting checks before commits
 # Install lefthook first: https://github.com/evilmartians/lefthook
 lefthook install
 
 # Download Go dependencies
 go mod download
 
-# Generate protobuf files
+# Generate protobuf files (requires Docker)
 make proto
 
 # Start PostgreSQL (required for local development)
@@ -74,13 +74,19 @@ make test
 **Option 1: Docker Compose (recommended for full stack)**
 
 ```bash
-# Start all services (PostgreSQL, Redis, Neo4j, API server, worker)
+# Start all services (PostgreSQL, Redis, Neo4j, API server, outbox worker)
+# Defaults to polling mode
 make up
 
+# Or explicitly choose a mode:
+make up-polling              # PostgreSQL + Redis + Neo4j, worker polls the outbox table
+make up-polling-eventbus     # Same, but worker publishes to Kafka; external consumers run handlers
+make up-debezium             # Debezium CDC mode - worker reads from Kafka topic
+
 # API server will be available at:
-# - HTTP: http://localhost:8080
-# - gRPC: http://localhost:9090
-# - Health: http://localhost:8081/health
+# - HTTP:  http://localhost:8080
+# - gRPC:  http://localhost:9090
+# - Health: http://localhost:8080/health
 
 # Stop all services
 make down
@@ -89,7 +95,7 @@ make down
 **Option 2: Native Go (for faster iteration)**
 
 ```bash
-# Start PostgreSQL only
+# Start infrastructure only
 docker compose up -d postgres
 
 # Run migrations
@@ -98,8 +104,62 @@ make migrate-up
 # Run the API server
 go run cmd/server/main.go
 
-# In another terminal, run the outbox worker
+# In a separate terminal, run the outbox worker
 go run cmd/worker/main.go
+```
+
+The server and worker are separate binaries. The worker is responsible for propagating outbox events to
+derived stores (Redis, Neo4j). For PostgreSQL-only development you can skip the worker; the API still
+functions correctly without it.
+
+---
+
+## Testing
+
+### Unit tests
+
+```bash
+make test
+# equivalent: go test ./...
+```
+
+Runs all unit and integration tests that do not require Docker.
+
+### E2E tests
+
+```bash
+make test-e2e
+# equivalent: go test -tags e2e ./...
+```
+
+Spins up real PostgreSQL containers via testcontainers. Requires Docker to be running.
+Covers the full REST and gRPC API surface for all four resources (repos, branches, commits, merges).
+
+### Outbox and matrix tests
+
+```bash
+make test-e2e-outbox
+# equivalent: go test -tags e2e,outbox ./... -timeout 30m
+```
+
+Requires Docker. Spins up PostgreSQL, Redis, and Neo4j containers and runs the full test matrix
+across four storage tiers:
+
+| Tier                   | Backends active    |
+| ---------------------- | ------------------ |
+| `postgres-only`        | PostgreSQL only    |
+| `postgres+redis`       | PostgreSQL + Redis |
+| `postgres+neo4j`       | PostgreSQL + Neo4j |
+| `postgres+redis+neo4j` | All three backends |
+
+Also includes Kafka/Redpanda tests that exercise the full outbox pipeline end-to-end
+(producer worker → Kafka → consumer → Neo4j/Redis projections).
+
+### All tests
+
+```bash
+make test-all
+# equivalent: go test -tags integration,e2e,outbox ./... -timeout 30m
 ```
 
 ---
@@ -114,12 +174,13 @@ go run cmd/worker/main.go
 
 ---
 
-## A few code conventions
+## Code conventions
 
 - Match the style of whatever file you're editing
 - Keep functions focused on one thing
 - Handle errors explicitly
 - Any new API behavior needs a structured error response with a machine-readable `error` code and a human-readable `message`
+- New storage backend operations go through the composite router layer, not directly to services
 
 ---
 
