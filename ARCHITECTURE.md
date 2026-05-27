@@ -1,6 +1,6 @@
 # Verge Architecture
 
-**Architecture Diagram:** [View on Excalidraw](https://excalidraw.com/#json=y2wsuxsG9_UBdr7tsFJas,TUoBXTDoZ4To1fLhjaY-DA)
+**Architecture Diagram:** [View on Excalidraw](https://excalidraw.com/#json=A-PBD8du8EgdC-xL5zh_T,Nzvc1jf4r-18ciDCsox4mQ)
 
 ---
 
@@ -12,22 +12,34 @@
 - [APIs](#apis)
   - [REST API](#rest-api)
     - [Repositories](#repositories)
-      - [`POST /repos`](#post-repos)
-      - [`GET /repos`](#get-repos)
-      - [`GET /repos/:repo_id`](#get-reposrepo_id)
+      - [`POST /v1/repos`](#post-v1repos)
+      - [`GET /v1/repos`](#get-v1repos)
+      - [`GET /v1/repos/:repo_id`](#get-v1reposrepo_id)
     - [Branches](#branches)
-      - [`POST /repos/:repo_id/branches`](#post-reposrepo_idbranches)
-      - [`GET /repos/:repo_id/branches`](#get-reposrepo_idbranches)
-      - [`PATCH /repos/:repo_id/branches/:name`](#patch-reposrepo_idbranchesname)
-      - [`DELETE /repos/:repo_id/branches/:name`](#delete-reposrepo_idbranchesname)
+      - [`POST /v1/repos/:repo_id/branches`](#post-v1reposrepo_idbranches)
+      - [`GET /v1/repos/:repo_id/branches`](#get-v1reposrepo_idbranches)
+      - [`GET /v1/repos/:repo_id/branches/:name`](#get-v1reposrepo_idbranchesname)
+      - [`PATCH /v1/repos/:repo_id/branches/:name`](#patch-v1reposrepo_idbranchesname)
+      - [`DELETE /v1/repos/:repo_id/branches/:name`](#delete-v1reposrepo_idbranchesname)
     - [Commits](#commits)
-      - [`POST /repos/:repo_id/commits`](#post-reposrepo_idcommits)
-      - [`GET /repos/:repo_id/commits`](#get-reposrepo_idcommits)
-      - [`GET /repos/:repo_id/commits/:commit_id`](#get-reposrepo_idcommitscommit_id)
-      - [`GET /repos/:repo_id/commits/:commit_id/parents`](#get-reposrepo_idcommitscommit_idparents)
+      - [`POST /v1/repos/:repo_id/commits`](#post-v1reposrepo_idcommits)
+      - [`GET /v1/repos/:repo_id/commits`](#get-v1reposrepo_idcommits)
+      - [`GET /v1/repos/:repo_id/commits/:commit_id`](#get-v1reposrepo_idcommitscommit_id)
+      - [`GET /v1/repos/:repo_id/commits/:commit_id/parents`](#get-v1reposrepo_idcommitscommit_idparents)
     - [Merges](#merges)
-      - [`POST /repos/:repo_id/merges`](#post-reposrepo_idmerges)
+      - [`POST /v1/repos/:repo_id/merges`](#post-v1reposrepo_idmerges)
+    - [Health](#health)
+      - [`GET /health`](#get-health)
   - [gRPC API](#grpc-api)
+- [Outbox Worker](#outbox-worker)
+  - [Event Sources](#event-sources)
+  - [Worker Modes](#worker-modes)
+  - [Built-in Handlers](#built-in-handlers)
+  - [Outbox Events](#outbox-events)
+- [Storage Layer & Composite Routing](#storage-layer--composite-routing)
+  - [BranchRouter](#branchrouter)
+  - [CommitRouter](#commitrouter)
+  - [GraphRouter](#graphrouter)
 - [Error Code Reference](#error-code-reference)
   - [Error Mapping - REST to gRPC](#error-mapping---rest-to-grpc)
 
@@ -100,8 +112,8 @@
 - Support Neo4j as an optional GraphStore for complex ancestry
   and merge-base queries when enabled by the operator
 
-- Support Redis as an optional BranchStore for
-  sub-millisecond branch head reads when enabled by the operator
+- Support Redis as an optional cache layer for sub-millisecond branch head
+  reads and commit object lookups when enabled by the operator
 
 - Support outbox replay; workers must be idempotent and
   replayable from any point without corrupting derived store state
@@ -118,7 +130,7 @@
 - The commit log must be append-only, no commit
   may ever be updated or deleted once written
 
-- Branch pointer advancement must use optimistic locking
+- Branch pointer advancement must use optimistic locking,
   no blind overwrites
 
 - The outbox event must be written in the same PostgreSQL transaction
@@ -128,7 +140,7 @@
 - PostgreSQL must always be the source of truth; derived stores (Neo4j, Redis)
   are optional projections and must be rebuildable from PostgreSQL at any time
 
-- The system must be horizontally scalable at the API layer
+- The system must be horizontally scalable at the API layer,
   the API service must be stateless
 
 - History traversal queries must support pagination,
@@ -145,7 +157,7 @@
 - All write operations must return a structured error response with
   a machine-readable error code and a human-readable message
 
-- The system must handle concurrent branch advancement gracefully
+- The system must handle concurrent branch advancement gracefully,
   returning a 409 with enough information for the caller to retry without data loss
 
 - The system must be operationally runnable at small scale
@@ -194,10 +206,13 @@ It moves forward as new commits are created. Carries just a name, a repo referen
 the product's actual data. Type, location, an optional hash, and optional metadata.
 
 **6. OutboxEvent:**
-Written in the same transaction as every commit. Not part of the version control domain itself, it is the consistency
-mechanism that keeps derived stores (Neo4j, Redis) in sync with PostgreSQL.
+Written in the same transaction as every commit or branch advance. Not part of the version control domain
+itself, it is the consistency mechanism that keeps derived stores (Neo4j, Redis) in sync with PostgreSQL.
+Two event types exist: `CommitCreated` and `BranchHeadMoved`.
 
 ## APIs
+
+All REST endpoints are mounted under the `/v1` prefix.
 
 ### REST API
 
@@ -207,7 +222,7 @@ mechanism that keeps derived stores (Neo4j, Redis) in sync with PostgreSQL.
 
 ---
 
-##### `POST /repos`
+##### `POST /v1/repos`
 
 Create a new repository.
 
@@ -244,7 +259,7 @@ Create a new repository.
 
 ---
 
-##### `GET /repos`
+##### `GET /v1/repos`
 
 List all repositories. Paginated.
 
@@ -281,7 +296,7 @@ List all repositories. Paginated.
 
 ---
 
-##### `GET /repos/:repo_id`
+##### `GET /v1/repos/:repo_id`
 
 Get a single repository by ID.
 
@@ -305,7 +320,7 @@ Get a single repository by ID.
 ```json
 {
   "error": "repo_not_found",
-  "message": "Repository 'repo_doc_abc123' does not exist."
+  "message": "The requested repository does not exist."
 }
 ```
 
@@ -315,7 +330,7 @@ Get a single repository by ID.
 
 ---
 
-##### `POST /repos/:repo_id/branches`
+##### `POST /v1/repos/:repo_id/branches`
 
 Create a new branch from any existing commit in this repository.
 
@@ -353,16 +368,9 @@ Create a new branch from any existing commit in this repository.
 | `404`  | `commit_not_found`      | `source_commit_id` does not exist in this repo    |
 | `409`  | `branch_already_exists` | Branch with this name already exists in this repo |
 
-```json
-{
-  "error": "commit_not_found",
-  "message": "Commit 'commit_bad' does not exist in repo 'repo_doc_abc123'."
-}
-```
-
 ---
 
-##### `GET /repos/:repo_id/branches`
+##### `GET /v1/repos/:repo_id/branches`
 
 List all branches in a repository. Paginated.
 
@@ -403,9 +411,34 @@ List all branches in a repository. Paginated.
 
 ---
 
-##### `PATCH /repos/:repo_id/branches/:name`
+##### `GET /v1/repos/:repo_id/branches/:name`
 
-Advance a branch pointer to a new commit. Requires `expected_commit_id` for optimistic locking prevents blind overwrites when two callers attempt to advance the same branch concurrently.
+Get a single branch by name, including its current head commit ID.
+
+**Response `200 OK`:**
+
+```json
+{
+  "name": "main",
+  "repo_id": "repo_doc_abc123",
+  "commit_id": "commit_v3",
+  "created_at": "2024-04-05T09:00:00Z"
+}
+```
+
+**Errors:**
+
+| Status | Error code         | Cause                     |
+| ------ | ------------------ | ------------------------- |
+| `404`  | `repo_not_found`   | Repository does not exist |
+| `404`  | `branch_not_found` | Branch does not exist     |
+
+---
+
+##### `PATCH /v1/repos/:repo_id/branches/:name`
+
+Advance a branch pointer to a new commit. Requires `expected_commit_id` for optimistic locking,
+prevents blind overwrites when two callers attempt to advance the same branch concurrently.
 
 **Request:**
 
@@ -416,10 +449,10 @@ Advance a branch pointer to a new commit. Requires `expected_commit_id` for opti
 }
 ```
 
-| Field                | Type   | Required | Notes                                                       |
-| -------------------- | ------ | -------- | ----------------------------------------------------------- |
-| `commit_id`          | string | yes      | The new head commit - must exist in this repo               |
-| `expected_commit_id` | string | yes      | The head the caller believes is current - rejected if stale |
+| Field                | Type   | Required | Notes                                                      |
+| -------------------- | ------ | -------- | ---------------------------------------------------------- |
+| `commit_id`          | string | yes      | The new head commit, must exist in this repo               |
+| `expected_commit_id` | string | yes      | The head the caller believes is current, rejected if stale |
 
 **Response `200 OK`:**
 
@@ -427,7 +460,8 @@ Advance a branch pointer to a new commit. Requires `expected_commit_id` for opti
 {
   "name": "main",
   "repo_id": "repo_doc_abc123",
-  "commit_id": "commit_v3"
+  "commit_id": "commit_v3",
+  "created_at": "2024-04-05T09:00:00Z"
 }
 ```
 
@@ -444,16 +478,16 @@ Advance a branch pointer to a new commit. Requires `expected_commit_id` for opti
 ```json
 {
   "error": "branch_conflict",
-  "message": "Branch 'main' is at 'commit_v3', not 'commit_v2'. Fetch the latest head and retry.",
+  "message": "Branch 'main' has advanced. Current head is 'commit_v3' but expected 'commit_v2'. Fetch the latest head and retry.",
   "current_head": "commit_v3"
 }
 ```
 
 ---
 
-##### `DELETE /repos/:repo_id/branches/:name`
+##### `DELETE /v1/repos/:repo_id/branches/:name`
 
-Delete a branch. Removes the branch pointer only - commits are not deleted.
+Delete a branch. Removes the branch pointer only, commits are not deleted.
 
 **Response `204 No Content`**
 
@@ -468,7 +502,7 @@ Delete a branch. Removes the branch pointer only - commits are not deleted.
 ```json
 {
   "error": "cannot_delete_default_branch",
-  "message": "Branch 'main' is the default branch of 'repo_doc_abc123' and cannot be deleted."
+  "message": "Cannot delete the default branch. Set a different default branch first."
 }
 ```
 
@@ -478,24 +512,27 @@ Delete a branch. Removes the branch pointer only - commits are not deleted.
 
 ---
 
-##### `POST /repos/:repo_id/commits`
+##### `POST /v1/repos/:repo_id/commits`
 
-Create a new commit. Handles three cases:
+Create a new commit. Handles two cases:
 
 - **Root commit** - `parent_ids` is empty. First commit in a repo.
 - **Regular commit** - `parent_ids` has exactly one entry.
-- **Merge commit** - use `POST /repos/:repo_id/merges` instead.
+- **Merge commit** - use `POST /v1/repos/:repo_id/merges` instead (two parents required).
 
-The commit is **not tied to a branch** - it is a standalone DAG node. Branch advancement is a separate operation (`PATCH /repos/:repo_id/branches/:name`), though `expected_head` here enforces that the branch has not moved before the product advances it after committing.
+The commit is a standalone DAG node and is **not tied to a branch**. Branch advancement is a separate
+operation (`PATCH /v1/repos/:repo_id/branches/:name`). Optimistic locking lives at the branch level, not
+the commit level.
 
-`idempotency_key` is optional. If provided and a commit with that key already exists in this repo, Verge returns the existing commit without creating a duplicate. Callers should always provide this on retry-prone operations.
+`idempotency_key` is optional. If provided and a commit with that key already exists in this repo, Verge
+returns the existing commit without creating a duplicate. The response will contain `"existing": true`.
+Callers should always provide this on retry-prone operations.
 
 **Request:**
 
 ```json
 {
   "parent_ids": ["commit_v1"],
-  "expected_head": "commit_v1",
   "data_pointer": {
     "type": "db",
     "location": "documents/snapshots/doc_abc123/v_1712345678",
@@ -507,70 +544,64 @@ The commit is **not tied to a branch** - it is a standalone DAG node. Branch adv
 }
 ```
 
-| Field                   | Type     | Required | Notes                                                   |
-| ----------------------- | -------- | -------- | ------------------------------------------------------- |
-| `parent_ids`            | string[] | yes      | Empty for root, one for regular. Use `/merges` for two. |
-| `expected_head`         | string   | no       | If set, Verge validates the target branch has not moved |
-| `data_pointer.type`     | string   | yes      | One of: `s3`, `url`, `db`, `custom`                     |
-| `data_pointer.location` | string   | yes      | Opaque to Verge                                         |
-| `data_pointer.hash`     | string   | no       | SHA-256 for integrity - format: `sha256:...`            |
-| `data_pointer.metadata` | object   | no       | Arbitrary JSON - opaque to Verge                        |
-| `message`               | string   | yes      | Human-readable description                              |
-| `author`                | string   | yes      | Identifier for the committing user or service           |
-| `idempotency_key`       | string   | no       | Client-generated UUID - enables safe retries            |
+| Field                   | Type     | Required | Notes                                                      |
+| ----------------------- | -------- | -------- | ---------------------------------------------------------- |
+| `parent_ids`            | string[] | yes      | Empty for root, one for regular. Use `/v1/merges` for two. |
+| `data_pointer.type`     | string   | yes      | One of: `s3`, `url`, `db`, `custom`                        |
+| `data_pointer.location` | string   | yes      | Opaque to Verge                                            |
+| `data_pointer.hash`     | string   | no       | SHA-256 for integrity - format: `sha256:...`               |
+| `data_pointer.metadata` | object   | no       | Arbitrary JSON - opaque to Verge                           |
+| `message`               | string   | yes      | Human-readable description                                 |
+| `author`                | string   | yes      | Identifier for the committing user or service              |
+| `idempotency_key`       | string   | no       | Client-generated UUID - enables safe retries               |
 
 **Response `201 Created`:**
 
 ```json
 {
-  "id": "commit_v2",
-  "repo_id": "repo_doc_abc123",
-  "parent_ids": ["commit_v1"],
-  "data_pointer": {
-    "type": "db",
-    "location": "documents/snapshots/doc_abc123/v_1712345678",
-    "hash": "sha256:a3f1c9d2e..."
+  "commit": {
+    "id": "commit_v2",
+    "repo_id": "repo_doc_abc123",
+    "parent_ids": ["commit_v1"],
+    "data_pointer": {
+      "type": "db",
+      "location": "documents/snapshots/doc_abc123/v_1712345678",
+      "hash": "sha256:a3f1c9d2e..."
+    },
+    "message": "Added executive summary",
+    "author": "user_alice@company.com",
+    "timestamp": "2024-04-05T10:05:00Z"
   },
-  "message": "Added executive summary",
-  "author": "user_alice@company.com",
-  "timestamp": "2024-04-05T10:05:00Z"
+  "existing": false
 }
 ```
 
-If `idempotency_key` matches an existing commit, returns `200 OK` with the existing commit instead of `201`.
+If `idempotency_key` matches an existing commit, returns `200 OK` with the existing commit and
+`"existing": true` instead of `201 Created`.
 
 **Errors:**
 
-| Status | Error code        | Cause                                                                      |
-| ------ | ----------------- | -------------------------------------------------------------------------- |
-| `400`  | `invalid_request` | Missing fields, invalid DataPointer type, two `parent_ids` (use `/merges`) |
-| `404`  | `repo_not_found`  | Repository does not exist                                                  |
-| `409`  | `branch_conflict` | `expected_head` was set and the branch has already advanced                |
-| `422`  | `invalid_parent`  | One or more `parent_ids` do not exist within this repo                     |
+| Status | Error code        | Cause                                                                         |
+| ------ | ----------------- | ----------------------------------------------------------------------------- |
+| `400`  | `invalid_request` | Missing fields, invalid DataPointer type, two `parent_ids` (use `/v1/merges`) |
+| `404`  | `repo_not_found`  | Repository does not exist                                                     |
+| `422`  | `invalid_parent`  | One or more `parent_ids` do not exist within this repo                        |
 
 ```json
 {
   "error": "invalid_parent",
-  "message": "Parent 'commit_bad' does not exist in repo 'repo_doc_abc123'."
-}
-```
-
-```json
-{
-  "error": "branch_conflict",
-  "message": "Branch head has advanced past 'commit_v1'. Fetch the latest head and retry.",
-  "current_head": "commit_v2"
+  "message": "One or more parent_ids do not exist in this repository."
 }
 ```
 
 ---
 
-##### `GET /repos/:repo_id/commits`
+##### `GET /v1/repos/:repo_id/commits`
 
 List or traverse commits in a repository. Controlled by the `traversal` param.
 
-- `flat` - returns commits in reverse chronological order with no DAG traversal. Efficient. Use for simple lists.
-- `dag` - traverses the DAG from the branch head, following parent links. Returns full reachable history. Use for version history panels.
+- `flat` (default) - returns commits in reverse chronological order with no DAG traversal. Efficient for simple lists.
+- `dag` - walks the commit graph from the branch head following parent links. Returns the full reachable history. Requires `branch`. Use for version history panels.
 
 **Query params:**
 
@@ -606,7 +637,7 @@ List or traverse commits in a repository. Controlled by the `traversal` param.
       "id": "commit_v1",
       "repo_id": "repo_doc_abc123",
       "parent_ids": [],
-      "data_pointer": { ... },
+      "data_pointer": { "...": "..." },
       "message": "Initial version",
       "author": "user_alice@company.com",
       "timestamp": "2024-04-05T09:00:00Z"
@@ -618,15 +649,14 @@ List or traverse commits in a repository. Controlled by the `traversal` param.
 
 **Errors:**
 
-| Status | Error code         | Cause                                                  |
-| ------ | ------------------ | ------------------------------------------------------ |
-| `400`  | `invalid_request`  | `traversal=dag` used without `branch`, invalid params  |
-| `404`  | `repo_not_found`   | Repository does not exist                              |
-| `404`  | `branch_not_found` | `branch` param references a branch that does not exist |
+| Status | Error code        | Cause                                                 |
+| ------ | ----------------- | ----------------------------------------------------- |
+| `400`  | `invalid_request` | `traversal=dag` used without `branch`, invalid params |
+| `404`  | `repo_not_found`  | Repository does not exist                             |
 
 ---
 
-##### `GET /repos/:repo_id/commits/:commit_id`
+##### `GET /v1/repos/:repo_id/commits/:commit_id`
 
 Get a single commit by ID including its full DataPointer.
 
@@ -657,9 +687,10 @@ Get a single commit by ID including its full DataPointer.
 
 ---
 
-##### `GET /repos/:repo_id/commits/:commit_id/parents`
+##### `GET /v1/repos/:repo_id/commits/:commit_id/parents`
 
-Get the immediate parent commits of a given commit. Returns full commit objects, not just IDs. Used for one-hop DAG traversal.
+Get the immediate parent commits of a given commit. Returns full commit objects, not just IDs.
+Used for one-hop DAG traversal.
 
 Root commits return an empty `parents` array. Merge commits return two entries.
 
@@ -673,7 +704,7 @@ Root commits return an empty `parents` array. Merge commits return two entries.
       "id": "commit_v3",
       "repo_id": "repo_doc_abc123",
       "parent_ids": ["commit_v2"],
-      "data_pointer": { ... },
+      "data_pointer": { "...": "..." },
       "message": "Suggested: expanded introduction",
       "author": "user_alice@company.com",
       "timestamp": "2024-04-05T10:30:00Z"
@@ -682,7 +713,7 @@ Root commits return an empty `parents` array. Merge commits return two entries.
       "id": "commit_v2",
       "repo_id": "repo_doc_abc123",
       "parent_ids": ["commit_v1"],
-      "data_pointer": { ... },
+      "data_pointer": { "...": "..." },
       "message": "Added executive summary",
       "author": "user_alice@company.com",
       "timestamp": "2024-04-05T10:05:00Z"
@@ -704,13 +735,16 @@ Root commits return an empty `parents` array. Merge commits return two entries.
 
 ---
 
-##### `POST /repos/:repo_id/merges`
+##### `POST /v1/repos/:repo_id/merges`
 
-Create a merge commit and advance the target branch atomically. The product supplies the already-computed merged DataPointer, Verge records the two-parent commit and moves the branch pointer in a single transaction.
+Create a merge commit and advance the target branch atomically. The product supplies the
+already-computed merged DataPointer; Verge records the two-parent commit and moves the branch pointer
+in a single transaction.
 
 `target_branch` can be any branch in the repo, not restricted to `main`.
 
-`expected_target_head` is required for optimistic locking. Verge validates that the target branch is still at this commit before proceeding. If the branch has moved, the request is rejected.
+`expected_target_head` is required for optimistic locking. Verge validates that the target branch is
+still at this commit before proceeding. If the branch has moved, the request is rejected with `409`.
 
 **Request:**
 
@@ -769,22 +803,33 @@ Create a merge commit and advance the target branch atomically. The product supp
 ```json
 {
   "error": "stale_merge_target",
-  "message": "Branch 'main' is at 'commit_v3' but expected 'commit_v2'. Fetch latest heads and recompute merge.",
+  "message": "Branch 'main' has moved during the merge. Current head is 'commit_v3' but expected 'commit_v2'. Fetch the latest heads and retry.",
   "current_head": "commit_v3"
 }
 ```
 
 ---
 
+#### Health
+
+---
+
+##### `GET /health`
+
+Liveness check. Returns `200 OK` with an empty body. Not versioned, available at the root, not under `/v1`.
+
+---
+
 ### gRPC API
 
-Same operations, same validation rules, same error semantics as the REST API. The `.proto` file is the authoritative contract - the REST interface must remain consistent with it.
+Same operations, same validation rules, same error semantics as the REST API. The `.proto` files are the
+authoritative contract - the REST interface must remain consistent with them.
 
 ```protobuf
 syntax = "proto3";
 package verge.v1;
 
-// ─── Shared types ─────────────────────────────────────────────────────────────
+// Shared types
 
 message DataPointer {
   string type     = 1;  // "s3" | "url" | "db" | "custom"
@@ -817,7 +862,7 @@ message Branch {
   string created_at = 4;  // ISO 8601
 }
 
-// ─── Repository service ───────────────────────────────────────────────────────
+// Repository service
 
 service RepositoryService {
   rpc CreateRepo (CreateRepoRequest) returns (Repository);
@@ -840,14 +885,15 @@ message ListReposRequest {
 }
 
 message ListReposResponse {
-  repeated Repository repos = 1;
+  repeated Repository repos       = 1;
   string              next_cursor = 2;
 }
 
-// ─── Branch service ───────────────────────────────────────────────────────────
+// Branch service
 
 service BranchService {
   rpc CreateBranch  (CreateBranchRequest)  returns (Branch);
+  rpc GetBranch     (GetBranchRequest)     returns (Branch);
   rpc ListBranches  (ListBranchesRequest)  returns (ListBranchesResponse);
   rpc AdvanceBranch (AdvanceBranchRequest) returns (Branch);
   rpc DeleteBranch  (DeleteBranchRequest)  returns (DeleteBranchResponse);
@@ -859,6 +905,11 @@ message CreateBranchRequest {
   string source_commit_id = 3;
 }
 
+message GetBranchRequest {
+  string repo_id = 1;
+  string name    = 2;
+}
+
 message ListBranchesRequest {
   string repo_id = 1;
   int32  limit   = 2;
@@ -866,7 +917,7 @@ message ListBranchesRequest {
 }
 
 message ListBranchesResponse {
-  repeated Branch branches   = 1;
+  repeated Branch branches    = 1;
   string          next_cursor = 2;
 }
 
@@ -884,7 +935,7 @@ message DeleteBranchRequest {
 
 message DeleteBranchResponse {}
 
-// ─── Commit service ───────────────────────────────────────────────────────────
+// Commit service
 
 service CommitService {
   rpc CreateCommit (CreateCommitRequest) returns (CreateCommitResponse);
@@ -896,11 +947,10 @@ service CommitService {
 message CreateCommitRequest {
   string          repo_id         = 1;
   repeated string parent_ids      = 2;
-  string          expected_head   = 3;  // optional - optimistic check
-  DataPointer     data_pointer    = 4;
-  string          message         = 5;
-  string          author          = 6;
-  string          idempotency_key = 7;  // optional - client-generated UUID
+  DataPointer     data_pointer    = 3;
+  string          message         = 4;
+  string          author          = 5;
+  string          idempotency_key = 6;  // optional - client-generated UUID
 }
 
 message CreateCommitResponse {
@@ -939,7 +989,7 @@ message GetParentsResponse {
   repeated Commit parents   = 2;
 }
 
-// ─── Merge service ────────────────────────────────────────────────────────────
+// Merge service
 
 service MergeService {
   rpc CreateMerge (CreateMergeRequest) returns (Commit);
@@ -958,6 +1008,168 @@ message CreateMergeRequest {
 
 ---
 
+## Outbox Worker
+
+The outbox worker is a **separate process** (`cmd/worker`) that reads `OutboxEvent` rows from PostgreSQL
+and propagates changes to derived stores (Neo4j, Redis). It runs independently from the API server.
+
+Every write that changes the commit graph or a branch pointer writes one or more `OutboxEvent` rows in
+the **same database transaction** as the write itself. The worker then picks up these events and dispatches
+them. If the worker crashes, events remain unprocessed (`processed = false`) and are picked up on restart.
+Replaying an event must always be safe.
+
+### Event Sources
+
+The worker reads events through an `EventSource` interface with two built-in implementations:
+
+**PollingSource** (default, `VERGE_OUTBOX_SOURCE_TYPE=polling`)
+
+Polls the `outbox_events` table on a configurable interval (`VERGE_OUTBOX_POLL_INTERVAL`, default `500ms`),
+fetching unprocessed rows in batches (`VERGE_OUTBOX_BATCH_SIZE`, default `100`). After successful
+processing, it marks rows `processed = true`. No external dependencies required.
+
+**DebeziumSource** (`VERGE_OUTBOX_SOURCE_TYPE=debezium`)
+
+Reads CDC events from a Kafka topic written by the Debezium PostgreSQL connector. Debezium captures every
+`INSERT` on the `outbox_events` table and publishes it as a Kafka message. The worker consumes from this
+topic using a configurable consumer group (`VERGE_OUTBOX_DEBEZIUM_GROUP_ID`). Kafka offset commits serve
+as the acknowledgement - no `processed = true` update needed. Suitable for high-throughput deployments
+that want to decouple the outbox from polling.
+
+The Debezium source understands the Debezium envelope format: it handles `c` (create), `r` (snapshot read),
+and `u` (update) operations, and skips events where `after.processed = true` or operation is `d` (delete).
+
+### Worker Modes
+
+The worker has two dispatch modes, selected by whether an `EventBus` is configured:
+
+**In-process mode** (default, `VERGE_OUTBOX_EVENTBUS_ENABLED=false`)
+
+The worker dispatches each event directly to registered `OutboxHandler` implementations in the same
+process. Handlers for Neo4j and Redis are wired at startup. Each event is dispatched to every handler
+that declares interest in that event type. Handlers that fail do not block other events - the event is
+left unprocessed and retried on the next poll.
+
+**EventBus mode** (`VERGE_OUTBOX_EVENTBUS_ENABLED=true`)
+
+The worker publishes the raw event batch to an external broker (e.g. Kafka) instead of dispatching in-process.
+External consumers then run the handlers. Implement the `EventBus` interface to use any broker - the
+built-in implementation targets Kafka (`VERGE_OUTBOX_EVENTBUS_TYPE=kafka`).
+
+In this mode the worker process acts as a producer only. A separate consumer process runs the handlers.
+
+### Built-in Handlers
+
+**Neo4jHandler**:- handles `CommitCreated` events.
+
+Writes Commit nodes and `PARENT_OF` edges to Neo4j. Uses Cypher `MERGE` statements so replaying the same
+event is idempotent, a node or edge that already exists is not duplicated. If a parent commit node does
+not yet exist in Neo4j (possible under parallel processing), it is created as a stub node that will be
+filled in when its own `CommitCreated` event arrives.
+
+```
+CommitCreated event received
+  │
+  ├── MERGE (c:Commit {id: commit_id}) SET c.repo_id, c.author, c.message, c.timestamp
+  └── For each parent_id:
+        MERGE (p:Commit {id: parent_id})
+        MERGE (c)-[:PARENT_OF]->(p)
+```
+
+**RedisHealHandler**:- handles `BranchHeadMoved` events.
+
+Updates the branch head cache in Redis. The event payload carries a `version` field (Unix milliseconds
+of the outbox event's `created_at` timestamp) which is used to prevent stale writes: a newer version
+already in the cache will not be overwritten by a replayed older event. This makes the handler idempotent
+under out-of-order delivery.
+
+```
+BranchHeadMoved event received
+  │
+  └── SetHead(repo_id, branch, commit_id, version)
+        → only written if version > current cached version
+```
+
+### Outbox Events
+
+Two event types are currently emitted:
+
+**`CommitCreated`**:- emitted in the same transaction as every `INSERT INTO commits`. Also emitted for
+merge commits.
+
+```json
+{
+  "commit_id": "commit_v2",
+  "repo_id": "repo_doc_abc123",
+  "parent_ids": ["commit_v1"],
+  "author": "user_alice@company.com",
+  "message": "Added executive summary",
+  "timestamp": "2024-04-05T10:05:00Z"
+}
+```
+
+**`BranchHeadMoved`**:- emitted whenever a branch pointer is advanced: on `PATCH /v1/repos/:repo_id/branches/:name`
+and atomically within `POST /v1/repos/:repo_id/merges`.
+
+```json
+{
+  "repo_id": "repo_doc_abc123",
+  "branch": "main",
+  "commit_id": "commit_v2",
+  "version": 1712345678000
+}
+```
+
+`version` is a Unix millisecond timestamp used by `RedisHealHandler` for idempotent ordering.
+
+---
+
+## Storage Layer & Composite Routing
+
+When multiple backends are enabled, the service layer does not talk directly to individual stores.
+Instead, three router types sit between the services and the storage backends, implementing the same
+store interface and routing reads and writes to the appropriate backend.
+
+### BranchRouter
+
+Routes branch operations across PostgreSQL and the Redis `BranchHeadStore`.
+
+**Read path (`GetHead`):** tries Redis first. On a cache hit, returns immediately. On a cache miss or
+Redis error, falls back to PostgreSQL and writes the result back to Redis to warm the cache.
+
+**Write path (`Advance`):** writes to PostgreSQL (the authoritative store), then eagerly updates Redis
+with the new head so subsequent reads hit cache without waiting for the outbox worker.
+
+**Other operations** (`Create`, `GetByName`, `List`, `Delete`) always go directly to PostgreSQL.
+
+Redis entries are given a TTL configured via `VERGE_STORAGE_REDIS_BRANCH_TTL` (default `30s`). The
+outbox-driven `RedisHealHandler` re-populates expired entries from `BranchHeadMoved` events.
+
+### CommitRouter
+
+Routes commit reads across PostgreSQL and the Redis `CommitCache`.
+
+**Read path (`GetByID`):** tries the Redis commit cache first. On a miss or error, falls back to PostgreSQL
+and populates the cache for the next read.
+
+**Write path (`Create`):** always writes to PostgreSQL. The cache is populated lazily on first read.
+
+`GetByIdempotencyKey`, `List`, `GetParents`, and `ValidateParentsExist` always go to PostgreSQL since
+these require consistent, queryable data that the commit cache does not index.
+
+### GraphRouter
+
+Routes ancestry and graph queries across Neo4j and the PostgreSQL graph store.
+
+**Neo4j primary:** `TraverseDAG`, `GetAncestors`, and `FindMergeBase` are attempted against Neo4j first.
+If Neo4j is unavailable or returns an error, the router falls back to the PostgreSQL implementation which
+uses recursive CTEs for graph traversal.
+
+This means all three graph operations work correctly even when Neo4j is disabled or unhealthy, at the
+cost of slower query performance. Neo4j exists to accelerate these queries at scale, not to gate them.
+
+---
+
 ## Error Code Reference
 
 All error responses follow this shape for both REST (JSON body) and gRPC (status detail):
@@ -970,20 +1182,21 @@ All error responses follow this shape for both REST (JSON body) and gRPC (status
 }
 ```
 
-`current_head` is only present in branch conflict and stale merge target errors - it gives the caller the information needed to retry without a round-trip.
+`current_head` is only present in `branch_conflict` and `stale_merge_target` errors - it gives the caller
+the current branch head so they can retry without an extra round-trip to fetch it.
 
-| Error code                     | Meaning                                                          |
-| ------------------------------ | ---------------------------------------------------------------- |
-| `invalid_request`              | Missing required field, wrong type, invalid enum value           |
-| `repo_not_found`               | The `repo_id` does not exist                                     |
-| `branch_not_found`             | The branch does not exist in this repo                           |
-| `branch_already_exists`        | A branch with this name already exists in this repo              |
-| `branch_conflict`              | Branch has advanced past `expected_commit_id` or `expected_head` |
-| `commit_not_found`             | The commit does not exist in this repo                           |
-| `invalid_parent`               | A `parent_id` does not exist within this repo                    |
-| `stale_merge_target`           | Target branch has moved past `expected_target_head`              |
-| `cannot_delete_default_branch` | Attempted to delete the repo's default branch                    |
-| `internal_error`               | Unexpected server-side failure                                   |
+| Error code                     | HTTP | Meaning                                                |
+| ------------------------------ | ---- | ------------------------------------------------------ |
+| `invalid_request`              | 400  | Missing required field, wrong type, invalid enum value |
+| `repo_not_found`               | 404  | The `repo_id` does not exist                           |
+| `branch_not_found`             | 404  | The branch does not exist in this repo                 |
+| `branch_already_exists`        | 409  | A branch with this name already exists in this repo    |
+| `branch_conflict`              | 409  | Branch has advanced past `expected_commit_id`          |
+| `commit_not_found`             | 404  | The commit does not exist in this repo                 |
+| `invalid_parent`               | 422  | A `parent_id` does not exist within this repo          |
+| `stale_merge_target`           | 409  | Target branch has moved past `expected_target_head`    |
+| `cannot_delete_default_branch` | 409  | Attempted to delete the repo's default branch          |
+| `internal_error`               | 500  | Unexpected server-side failure                         |
 
 ---
 

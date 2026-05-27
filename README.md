@@ -31,10 +31,10 @@ Verge is built around a small set of concepts:
 A typical save looks like this:
 
 ```
-1. User saves -> you serialize and store the snapshot in your own DB/S3
+1. User saves → you serialize and store the snapshot in your own DB/S3
 2. You construct a DataPointer pointing to it
-3. POST /repos/:repo_id/commits        -> Verge records the commit
-4. PATCH /repos/:repo_id/branches/main -> Verge advances the branch
+3. POST /v1/repos/:repo_id/commits        → Verge records the commit
+4. PATCH /v1/repos/:repo_id/branches/main → Verge advances the branch
 ```
 
 Restore, branching, merging, and history queries all follow the same pattern. Your product owns the data and the logic, Verge owns the graph.
@@ -43,20 +43,20 @@ Restore, branching, merging, and history queries all follow the same pattern. Yo
 
 ## API
 
-Verge exposes both a REST API and a gRPC API (`.proto` files included). No SDK is required, the raw HTTP interface is enough to fully integrate.
+Verge exposes both a REST API (all routes under `/v1`) and a gRPC API (`.proto` files included). No SDK is required, the raw HTTP interface is enough to fully integrate.
 
 Core endpoints:
 
-| Operation         | Endpoint                                                |
-| ----------------- | ------------------------------------------------------- |
-| Create repository | `POST /repos`                                           |
-| Create commit     | `POST /repos/:repo_id/commits`                          |
-| Advance branch    | `PATCH /repos/:repo_id/branches/:name`                  |
-| Create branch     | `POST /repos/:repo_id/branches`                         |
-| Merge branch      | `POST /repos/:repo_id/merges`                           |
-| Get branch head   | `GET /repos/:repo_id/branches`                          |
-| Get commit        | `GET /repos/:repo_id/commits/:commit_id`                |
-| Traverse history  | `GET /repos/:repo_id/commits?traversal=dag&branch=main` |
+| Operation         | Endpoint                                                   |
+| ----------------- | ---------------------------------------------------------- |
+| Create repository | `POST /v1/repos`                                           |
+| Create commit     | `POST /v1/repos/:repo_id/commits`                          |
+| Advance branch    | `PATCH /v1/repos/:repo_id/branches/:name`                  |
+| Create branch     | `POST /v1/repos/:repo_id/branches`                         |
+| Merge branch      | `POST /v1/repos/:repo_id/merges`                           |
+| Get branch head   | `GET /v1/repos/:repo_id/branches/:name`                    |
+| Get commit        | `GET /v1/repos/:repo_id/commits/:commit_id`                |
+| Traverse history  | `GET /v1/repos/:repo_id/commits?traversal=dag&branch=main` |
 
 All write operations use optimistic locking. If two callers try to advance the same branch concurrently, one gets a `409` with the current head so it can retry safely without losing anything.
 
@@ -70,21 +70,39 @@ Verge is designed to scale with your product:
 
 **PostgreSQL** (required) - Always the source of truth. All commits, branches, and metadata are stored here.
 
-**Redis** (optional) - Enable for sub-millisecond branch head reads. Verge uses Redis as a cache layer for frequently accessed branch pointers.
+**Redis** (optional) - Enable for sub-millisecond branch head reads and cached commit lookups. Verge maintains two separate Redis data structures: a branch head cache (with configurable TTL) and a commit object cache. Both fall back to PostgreSQL transparently on a miss.
 
-**Neo4j** (optional) - Enable for complex ancestry queries at large scale. Neo4j provides optimized graph traversal for deep history queries and merge-base operations.
+**Neo4j** (optional) - Enable for complex ancestry queries at scale. Neo4j provides optimized graph traversal for deep history queries and merge-base operations, with automatic fallback to PostgreSQL recursive CTEs when unavailable.
 
-You choose which backends to enable based on your product's scale and infrastructure management capabilities. The API surface is identical regardless of which backends are active - you can start with PostgreSQL only and add Redis or Neo4j later without changing your integration.
+You choose which backends to enable based on your product's scale and infrastructure. The API surface is identical regardless, you can start with PostgreSQL only and add Redis or Neo4j later without changing your integration.
 
 All derived stores (Redis, Neo4j) are projections that can be rebuilt from PostgreSQL at any time.
 
 ---
 
+## Running Verge
+
+Verge ships as two binaries: `cmd/server` (the API server) and `cmd/worker` (the outbox worker).
+The worker propagates commit and branch changes to Redis and Neo4j asynchronously. The API server
+functions correctly without it, but Redis and Neo4j will not receive updates until the worker runs.
+
+```bash
+# Full stack via Docker Compose (recommended)
+make up
+
+# Or run natively
+go run cmd/server/main.go   # API server
+go run cmd/worker/main.go   # Outbox worker (separate terminal)
+```
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for full setup instructions and all available `make` commands.
+
+---
+
 ## Integration guides
 
-- [Internal system flows](./INTERNAL_FLOW.md) - what happens inside Verge on every request: what gets validated, what gets written, what gets rejected, and what happens asynchronously
 - [Product integration flows](./PRODUCT_INTEGRATION_FLOW.md) - end-to-end walkthroughs for three different product types (document editor, design tool, AI workflow builder)
-- [Architecture and API reference](./ARCHITECTURE.md) - full REST and gRPC API specs, entity model, storage backend details, and error code reference
+- [Architecture and API reference](./ARCHITECTURE.md) - full REST and gRPC API specs, entity model, storage backend details, outbox worker architecture, and error code reference
 
 ---
 
@@ -92,7 +110,7 @@ All derived stores (Redis, Neo4j) are projections that can be rebuilt from Postg
 
 Verge is early. Here's what's coming:
 
-- **SDKs** - official clients for TypeScript/Node.js, Python, and Go so you don't have to hand-roll HTTP calls
+- **SDKs** - official clients for TypeScript/Node.js, Python, and Go.
 
 ---
 

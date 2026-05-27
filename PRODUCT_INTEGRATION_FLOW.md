@@ -1,6 +1,6 @@
 # Verge - Integration Flow
 
-This document walks through three integration scenarios from the **product's point of view**, what they need to build, what they hand off to Verge, and what they get back. Each product has different data formats, different merge complexity, and different scale characteristics. Verge's role is identical in all three cases: track the graph, store the pointer, stay out of the data.
+This document walks through three integration scenarios from the **product's point of view**: what they need to build, what they hand off to Verge, and what they get back. Each product has different data formats, different merge complexity, and different scale characteristics. Verge's role is identical in all three cases: track the graph, store the pointer, stay out of the data.
 
 ---
 
@@ -51,13 +51,16 @@ DataPointer       =  reference to the document snapshot in product storage
 }
 ```
 
-The `location` is a row ID or path in the product's own snapshot storage. The `hash` is a SHA-256 of the snapshot content, computed by the product before calling Verge, used for integrity verification on restore. Verge stores this struct as an opaque blob, it never reads `snapshot_format` or `word_count`.
+The `location` is a row ID or path in the product's own snapshot storage. The `hash` is a SHA-256 of the
+snapshot content, computed by the product before calling Verge, used for integrity verification on restore.
+Verge stores this struct as an opaque blob - it never reads `snapshot_format` or `word_count`.
 
 ### What the product needs to build
 
 **1. Snapshot writer**
 
-Before calling Verge, the product must serialize the current document state into a stable, versioned snapshot format and persist it to its own storage.
+Before calling Verge, the product must serialize the current document state into a stable, versioned
+snapshot format and persist it to its own storage.
 
 ```
 User clicks "Save version"
@@ -70,13 +73,15 @@ User clicks "Save version"
 
 **2. Verge commit call**
 
-After the snapshot is persisted, the product calls Verge. The commit is created first, then the branch is advanced separately.
+After the snapshot is persisted, the product calls Verge. The commit is created first, then the branch
+is advanced separately. `idempotency_key` should always be set on retry-prone operations - if the network
+drops after Verge creates the commit but before the response arrives, retrying with the same key returns
+the existing commit (`"existing": true`) instead of creating a duplicate.
 
 ```http
-POST /repos/repo_doc_abc123/commits
+POST /v1/repos/repo_doc_abc123/commits
 {
   "parent_ids": ["commit_v1"],
-  "expected_head": "commit_v1",
   "data_pointer": {
     "type": "db",
     "location": "documents/snapshots/doc_abc123/v_1712345678",
@@ -89,10 +94,27 @@ POST /repos/repo_doc_abc123/commits
 }
 ```
 
+Response `201 Created` (or `200 OK` with `"existing": true` on a retry):
+
+```json
+{
+  "commit": {
+    "id": "commit_v2",
+    "repo_id": "repo_doc_abc123",
+    "parent_ids": ["commit_v1"],
+    "data_pointer": { "...": "..." },
+    "message": "Version saved by Alice - added executive summary",
+    "author": "user_alice@company.com",
+    "timestamp": "2024-04-05T10:05:00Z"
+  },
+  "existing": false
+}
+```
+
 After the commit is created, advance the branch:
 
 ```http
-PATCH /repos/repo_doc_abc123/branches/main
+PATCH /v1/repos/repo_doc_abc123/branches/main
 {
   "commit_id": "commit_v2",
   "expected_commit_id": "commit_v1"
@@ -101,18 +123,19 @@ PATCH /repos/repo_doc_abc123/branches/main
 
 **3. Version restore**
 
-To restore a past version, the product fetches the old commit from Verge, extracts the DataPointer, loads the snapshot, and commits it as a new commit pointing to the current head. History is never rewritten.
+To restore a past version, the product fetches the old commit from Verge, extracts the DataPointer, loads
+the snapshot, and commits it as a new commit pointing to the current head. History is never rewritten.
 
 ```
 User clicks "Restore version X"
   │
-  ├── GET /repos/repo_doc_abc123/commits/commit_v1   ← fetch old commit
+  ├── GET /v1/repos/repo_doc_abc123/commits/commit_v1   ← fetch old commit
   ├── Extract data_pointer.location
-  ├── Load snapshot from product storage             ← product's own DB
+  ├── Load snapshot from product storage                ← product's own DB
   ├── Replace current document state in memory
-  ├── POST /repos/repo_doc_abc123/commits            ← commit the restored state
+  ├── POST /v1/repos/repo_doc_abc123/commits            ← commit the restored state
   │     { parent_ids: [current_head], data_pointer: same as commit_v1, message: "Restored to v1" }
-  └── PATCH /repos/repo_doc_abc123/branches/main    ← advance branch to restore commit
+  └── PATCH /v1/repos/repo_doc_abc123/branches/main    ← advance branch to restore commit
 ```
 
 **4. Branch for suggested edits**
@@ -122,28 +145,29 @@ When a user wants to make a tracked suggestion without affecting the main docume
 ```
 User enables "Suggest mode"
   │
-  ├── GET /repos/repo_doc_abc123/branches (or fetch current head)
-  └── POST /repos/repo_doc_abc123/branches
+  ├── GET /v1/repos/repo_doc_abc123/branches/main  ← fetch current head
+  └── POST /v1/repos/repo_doc_abc123/branches
         { "name": "suggest-alice-20240405", "source_commit_id": "commit_v2" }
 
 Alice saves her edit
   │
-  ├── POST /repos/repo_doc_abc123/commits
-  │     { parent_ids: ["commit_v2"], expected_head: "commit_v2", data_pointer: {...} }
-  └── PATCH /repos/repo_doc_abc123/branches/suggest-alice-20240405
+  ├── POST /v1/repos/repo_doc_abc123/commits
+  │     { parent_ids: ["commit_v2"], data_pointer: {...} }
+  └── PATCH /v1/repos/repo_doc_abc123/branches/suggest-alice-20240405
         { commit_id: "commit_v3", expected_commit_id: "commit_v2" }
 
-Alice finishes, reviewer approves → product calls POST /repos/repo_doc_abc123/merges
+Alice finishes, reviewer approves → product calls POST /v1/repos/repo_doc_abc123/merges
 ```
 
 **5. Diff display**
 
-The product loads both commit snapshots from its own storage and computes the diff itself. Verge provides the commit list and DataPointers only.
+The product loads both commit snapshots from its own storage and computes the diff itself. Verge provides
+the commit list and DataPointers only.
 
 ```
 User opens version history panel
   │
-  ├── GET /repos/repo_doc_abc123/commits?branch=main&traversal=dag&limit=20
+  ├── GET /v1/repos/repo_doc_abc123/commits?branch=main&traversal=dag&limit=20
   │     ← Verge returns commit list with DataPointers
   ├── For each pair: load snapshot A and snapshot B from product storage
   └── Run product's own diff algorithm → render highlighted changes in UI
@@ -155,7 +179,10 @@ User opens version history panel
 
 ### Context
 
-A Figma-like product manages design files. A file contains a tree of layers, frames, components, and assets. The file format is complex, deeply nested, binary-heavy (images, fonts), and large. Multiple designers work on the same file. The product needs branching so a designer can work on a redesign in isolation, and merging so the redesign can be integrated back into the main file.
+A Figma-like product manages design files. A file contains a tree of layers, frames, components, and
+assets. The file format is complex, deeply nested, binary-heavy (images, fonts), and large. Multiple
+designers work on the same file. The product needs branching so a designer can work on a redesign in
+isolation, and merging so the redesign can be integrated back into the main file.
 
 ### What the product owns
 
@@ -207,10 +234,9 @@ Designer hits Cmd+S or explicit "Save version"
 **2. Verge commit call**
 
 ```http
-POST /repos/repo_file_xyz/commits
+POST /v1/repos/repo_file_xyz/commits
 {
   "parent_ids": ["commit_prev_head"],
-  "expected_head": "commit_prev_head",
   "data_pointer": {
     "type": "s3",
     "location": "s3://design-files/file_xyz/snapshots/1712345678.fig",
@@ -231,7 +257,7 @@ POST /repos/repo_file_xyz/commits
 Then advance the branch:
 
 ```http
-PATCH /repos/repo_file_xyz/branches/main
+PATCH /v1/repos/repo_file_xyz/branches/main
 {
   "commit_id": "commit_new",
   "expected_commit_id": "commit_prev_head"
@@ -243,13 +269,13 @@ PATCH /repos/repo_file_xyz/branches/main
 ```
 Designer creates new branch in UI
   │
-  └── POST /repos/repo_file_xyz/branches
+  └── POST /v1/repos/repo_file_xyz/branches
         { "name": "dark-mode-experiment", "source_commit_id": "main_head" }
 
 Designer saves on the branch
   │
-  ├── POST /repos/repo_file_xyz/commits { parent_ids: ["main_head"], ... }
-  └── PATCH /repos/repo_file_xyz/branches/dark-mode-experiment
+  ├── POST /v1/repos/repo_file_xyz/commits { parent_ids: ["main_head"], ... }
+  └── PATCH /v1/repos/repo_file_xyz/branches/dark-mode-experiment
         { commit_id: "new_commit", expected_commit_id: "main_head" }
 ```
 
@@ -258,11 +284,11 @@ Designer saves on the branch
 ```
 Designer opens version history panel
   │
-  ├── GET /repos/repo_file_xyz/commits?branch=main&traversal=dag&limit=20
+  ├── GET /v1/repos/repo_file_xyz/commits?branch=main&traversal=dag&limit=20
   ├── Designer selects two versions to compare
-  ├── GET /repos/repo_file_xyz/commits/commit_a   ← DataPointer for version A
-  ├── GET /repos/repo_file_xyz/commits/commit_b   ← DataPointer for version B
-  ├── Download both .fig files from S3            ← product fetches from its own storage
+  ├── GET /v1/repos/repo_file_xyz/commits/commit_a   ← DataPointer for version A
+  ├── GET /v1/repos/repo_file_xyz/commits/commit_b   ← DataPointer for version B
+  ├── Download both .fig files from S3               ← product fetches from its own storage
   ├── Run product's layer-tree diff
   └── Render visual diff overlay in canvas
 ```
@@ -272,13 +298,14 @@ Designer opens version history panel
 ```
 Designer requests branch merge into main
   │
-  ├── GET /repos/repo_file_xyz/branches           ← fetch both branch heads
-  ├── GET /repos/repo_file_xyz/commits/{head_a}   ← DataPointer for branch head
-  ├── GET /repos/repo_file_xyz/commits/{head_b}   ← DataPointer for main head
+  ├── GET /v1/repos/repo_file_xyz/branches/main             ← main head
+  ├── GET /v1/repos/repo_file_xyz/branches/dark-mode-experiment  ← branch head
+  ├── GET /v1/repos/repo_file_xyz/commits/{head_a}           ← DataPointer for branch head
+  ├── GET /v1/repos/repo_file_xyz/commits/{head_b}           ← DataPointer for main head
   ├── Download both .fig files, run merge algorithm
   ├── Designer resolves conflicts in canvas
   ├── Upload merged .fig to S3, generate DataPointer
-  └── POST /repos/repo_file_xyz/merges
+  └── POST /v1/repos/repo_file_xyz/merges
         {
           "parent_ids": ["dark_mode_head", "main_head"],
           "expected_target_head": "main_head",
@@ -294,7 +321,7 @@ Designer requests branch merge into main
 ```
 GC job (runs periodically)
   │
-  ├── GET /repos/repo_file_xyz/commits?traversal=dag&branch=main (paginated, all pages)
+  ├── GET /v1/repos/repo_file_xyz/commits?traversal=dag&branch=main (paginated, all pages)
   ├── Collect all data_pointer.location values (S3 keys)
   ├── List all objects in S3 under design-files/{file_id}/snapshots/
   └── Delete any S3 object not referenced by any commit's DataPointer
@@ -306,7 +333,11 @@ GC job (runs periodically)
 
 ### Context
 
-An AI workflow product lets users build pipelines of AI operations - LLM calls, data transforms, conditional logic, API calls. Each workflow is a JSON definition of nodes and edges. Users iterate constantly: tweaking prompts, swapping models, adjusting parameters. They need to track what changed between runs, branch to test a different prompt strategy, and restore a previous workflow state if a change degrades performance.
+An AI workflow product lets users build pipelines of AI operations - LLM calls, data transforms,
+conditional logic, API calls. Each workflow is a JSON definition of nodes and edges. Users iterate
+constantly: tweaking prompts, swapping models, adjusting parameters. They need to track what changed
+between runs, branch to test a different prompt strategy, and restore a previous workflow state if a
+change degrades performance.
 
 ### What the product owns
 
@@ -356,10 +387,9 @@ User saves workflow
 **2. Verge commit call**
 
 ```http
-POST /repos/repo_wf_123/commits
+POST /v1/repos/repo_wf_123/commits
 {
   "parent_ids": ["commit_prev_head"],
-  "expected_head": "commit_prev_head",
   "data_pointer": {
     "type": "db",
     "location": "workflows/versions/wf_123/v_1712345678",
@@ -379,7 +409,7 @@ POST /repos/repo_wf_123/commits
 Then advance the branch:
 
 ```http
-PATCH /repos/repo_wf_123/branches/main
+PATCH /v1/repos/repo_wf_123/branches/main
 {
   "commit_id": "commit_new",
   "expected_commit_id": "commit_prev_head"
@@ -391,13 +421,13 @@ PATCH /repos/repo_wf_123/branches/main
 ```
 User creates experiment branch
   │
-  └── POST /repos/repo_wf_123/branches
+  └── POST /v1/repos/repo_wf_123/branches
         { "name": "experiment-claude-sonnet", "source_commit_id": "main_head" }
 
 User commits to experiment branch
   │
-  ├── POST /repos/repo_wf_123/commits { parent_ids: ["main_head"], ... }
-  └── PATCH /repos/repo_wf_123/branches/experiment-claude-sonnet
+  ├── POST /v1/repos/repo_wf_123/commits { parent_ids: ["main_head"], ... }
+  └── PATCH /v1/repos/repo_wf_123/branches/experiment-claude-sonnet
         { commit_id: "exp_commit", expected_commit_id: "main_head" }
 
 User runs experiment in staging, compares execution results
@@ -405,7 +435,7 @@ User runs experiment in staging, compares execution results
 
 Experiment wins → merge into main
   │
-  └── POST /repos/repo_wf_123/merges
+  └── POST /v1/repos/repo_wf_123/merges
         {
           "parent_ids": ["exp_head", "main_head"],
           "expected_target_head": "main_head",
@@ -424,13 +454,13 @@ Environments as Verge branches:
   production  →  currently deployed
 
 Deployment flow:
-  POST /repos/repo_wf_123/merges  { target_branch: "staging", ... }
+  POST /v1/repos/repo_wf_123/merges  { target_branch: "staging", ... }
   (run integration tests)
-  POST /repos/repo_wf_123/merges  { target_branch: "production", ... }
+  POST /v1/repos/repo_wf_123/merges  { target_branch: "production", ... }
 
 Production environment reads from production branch head:
-  GET /repos/repo_wf_123/branches?name=production  → gets commit_id
-  GET /repos/repo_wf_123/commits/{commit_id}        → gets DataPointer
+  GET /v1/repos/repo_wf_123/branches/production  → gets commit_id
+  GET /v1/repos/repo_wf_123/commits/{commit_id}  → gets DataPointer
 ```
 
 **5. Rollback**
@@ -438,17 +468,18 @@ Production environment reads from production branch head:
 ```
 Bad version detected in production
   │
-  ├── GET /repos/repo_wf_123/commits?traversal=dag&branch=production
+  ├── GET /v1/repos/repo_wf_123/commits?traversal=dag&branch=production
   │     ← find the last known good commit
   ├── Extract DataPointer from that commit
-  └── POST /repos/repo_wf_123/commits
+  └── POST /v1/repos/repo_wf_123/commits
         {
           parent_ids: [current_bad_head],
           data_pointer: { same pointer as last good commit },
           message: "Rollback to v12 - v13 caused 40% output degradation",
           author: "system"
         }
-      then PATCH /repos/repo_wf_123/branches/production { commit_id: rollback_commit }
+      then PATCH /v1/repos/repo_wf_123/branches/production
+        { commit_id: rollback_commit, expected_commit_id: current_bad_head }
 ```
 
 History is intact - the audit trail shows exactly what happened and why, without rewriting anything.
@@ -458,7 +489,7 @@ History is intact - the audit trail shows exactly what happened and why, without
 ```
 Workflow executed
   │
-  ├── GET /repos/repo_wf_123/branches?name=production  ← get current commit_id
+  ├── GET /v1/repos/repo_wf_123/branches/production  ← get current commit_id
   └── Record in product DB: { commit_id, execution_id, inputs, outputs, latency }
         (commit_id links the execution to its exact workflow version - Verge not involved)
 ```
