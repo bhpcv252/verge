@@ -37,7 +37,6 @@ type dataPointerRequest struct {
 
 type createCommitRequest struct {
 	ParentIDs      []string           `json:"parent_ids"`
-	ExpectedHead   string             `json:"expected_head"`
 	DataPointer    dataPointerRequest `json:"data_pointer"`
 	Message        string             `json:"message"`
 	Author         string             `json:"author"`
@@ -88,7 +87,6 @@ func (h *CommitHandler) CreateCommit(w http.ResponseWriter, r *http.Request) {
 	req.Message = strings.TrimSpace(req.Message)
 	req.Author = strings.TrimSpace(req.Author)
 	req.IdempotencyKey = strings.TrimSpace(req.IdempotencyKey)
-	req.ExpectedHead = strings.TrimSpace(req.ExpectedHead)
 
 	if req.Message == "" {
 		badRequest(w, "'message' is required and must not be empty.")
@@ -104,9 +102,8 @@ func (h *CommitHandler) CreateCommit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := h.svc.CreateCommit(r.Context(), service.CreateCommitInput{
-		RepoID:       repoID,
-		ParentIDs:    req.ParentIDs,
-		ExpectedHead: req.ExpectedHead,
+		RepoID:    repoID,
+		ParentIDs: req.ParentIDs,
 		DataPointer: domain.DataPointer{
 			Type:     req.DataPointer.Type,
 			Location: req.DataPointer.Location,

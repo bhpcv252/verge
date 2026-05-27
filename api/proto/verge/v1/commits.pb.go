@@ -25,11 +25,10 @@ type CreateCommitRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	RepoId         string                 `protobuf:"bytes,1,opt,name=repo_id,json=repoId,proto3" json:"repo_id,omitempty"`
 	ParentIds      []string               `protobuf:"bytes,2,rep,name=parent_ids,json=parentIds,proto3" json:"parent_ids,omitempty"`
-	ExpectedHead   string                 `protobuf:"bytes,3,opt,name=expected_head,json=expectedHead,proto3" json:"expected_head,omitempty"` // optional - optimistic check
-	DataPointer    *DataPointer           `protobuf:"bytes,4,opt,name=data_pointer,json=dataPointer,proto3" json:"data_pointer,omitempty"`
-	Message        string                 `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-	Author         string                 `protobuf:"bytes,6,opt,name=author,proto3" json:"author,omitempty"`
-	IdempotencyKey string                 `protobuf:"bytes,7,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"` // optional - client-generated UUID
+	DataPointer    *DataPointer           `protobuf:"bytes,3,opt,name=data_pointer,json=dataPointer,proto3" json:"data_pointer,omitempty"`
+	Message        string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	Author         string                 `protobuf:"bytes,5,opt,name=author,proto3" json:"author,omitempty"`
+	IdempotencyKey string                 `protobuf:"bytes,6,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"` // optional - client-generated UUID
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -76,13 +75,6 @@ func (x *CreateCommitRequest) GetParentIds() []string {
 		return x.ParentIds
 	}
 	return nil
-}
-
-func (x *CreateCommitRequest) GetExpectedHead() string {
-	if x != nil {
-		return x.ExpectedHead
-	}
-	return ""
 }
 
 func (x *CreateCommitRequest) GetDataPointer() *DataPointer {
@@ -477,16 +469,15 @@ var File_verge_v1_commits_proto protoreflect.FileDescriptor
 
 const file_verge_v1_commits_proto_rawDesc = "" +
 	"\n" +
-	"\x16verge/v1/commits.proto\x12\bverge.v1\x1a\x15verge/v1/common.proto\"\x87\x02\n" +
+	"\x16verge/v1/commits.proto\x12\bverge.v1\x1a\x15verge/v1/common.proto\"\xe2\x01\n" +
 	"\x13CreateCommitRequest\x12\x17\n" +
 	"\arepo_id\x18\x01 \x01(\tR\x06repoId\x12\x1d\n" +
 	"\n" +
-	"parent_ids\x18\x02 \x03(\tR\tparentIds\x12#\n" +
-	"\rexpected_head\x18\x03 \x01(\tR\fexpectedHead\x128\n" +
-	"\fdata_pointer\x18\x04 \x01(\v2\x15.verge.v1.DataPointerR\vdataPointer\x12\x18\n" +
-	"\amessage\x18\x05 \x01(\tR\amessage\x12\x16\n" +
-	"\x06author\x18\x06 \x01(\tR\x06author\x12'\n" +
-	"\x0fidempotency_key\x18\a \x01(\tR\x0eidempotencyKey\"\\\n" +
+	"parent_ids\x18\x02 \x03(\tR\tparentIds\x128\n" +
+	"\fdata_pointer\x18\x03 \x01(\v2\x15.verge.v1.DataPointerR\vdataPointer\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\x12\x16\n" +
+	"\x06author\x18\x05 \x01(\tR\x06author\x12'\n" +
+	"\x0fidempotency_key\x18\x06 \x01(\tR\x0eidempotencyKey\"\\\n" +
 	"\x14CreateCommitResponse\x12(\n" +
 	"\x06commit\x18\x01 \x01(\v2\x10.verge.v1.CommitR\x06commit\x12\x1a\n" +
 	"\bexisting\x18\x02 \x01(\bR\bexisting\"H\n" +

@@ -56,7 +56,6 @@ func (s *CommitServer) CreateCommit(
 	result, err := s.svc.CreateCommit(ctx, service.CreateCommitInput{
 		RepoID:         repoID,
 		ParentIDs:      req.ParentIds,
-		ExpectedHead:   strings.TrimSpace(req.ExpectedHead),
 		DataPointer:    dataPointer,
 		Message:        message,
 		Author:         author,
