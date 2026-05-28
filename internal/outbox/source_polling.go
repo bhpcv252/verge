@@ -102,3 +102,14 @@ func (s *PollingSource) Close() error {
 func (s *PollingSource) Name() string {
 	return "polling"
 }
+
+func (s *PollingSource) PendingCount(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM outbox_events WHERE processed = false`,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("outbox: pending count: %w", err)
+	}
+	return count, nil
+}

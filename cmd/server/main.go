@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	grpcv1 "github.com/bhpcv252/verge/internal/api/grpc/v1"
 	restv1 "github.com/bhpcv252/verge/internal/api/rest/v1"
 	"github.com/bhpcv252/verge/internal/config"
+	"github.com/bhpcv252/verge/internal/observability"
 	"github.com/bhpcv252/verge/internal/service"
 	"github.com/bhpcv252/verge/internal/storage/composite"
 	neo4jstore "github.com/bhpcv252/verge/internal/storage/neo4j"
@@ -36,6 +38,26 @@ func run() error {
 		return fmt.Errorf("config: %w", err)
 	}
 
+	obs, err := observability.New(cfg.OTel)
+	if err != nil {
+		return fmt.Errorf("observability: %w", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := obs.Shutdown(ctx); err != nil {
+			log.Printf("observability shutdown error: %v", err)
+		}
+	}()
+
+	logger := obs.Logger.With(slog.String("component", "server"))
+	logger.Info("starting verge server",
+		slog.Bool("otel_enabled", cfg.OTel.Enabled),
+		slog.String("otel_exporter", cfg.OTel.Exporter),
+		slog.Bool("http_enabled", cfg.Server.HTTP.Enabled),
+		slog.Bool("grpc_enabled", cfg.Server.GRPC.Enabled),
+	)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -45,6 +67,7 @@ func run() error {
 		return fmt.Errorf("postgres: %w", err)
 	}
 	defer pool.Close()
+	logger.Info("postgres: connected")
 
 	// Base postgres stores
 	pgBranchStore := postgres.NewBranchStore(pool)
@@ -52,7 +75,6 @@ func run() error {
 	repoStore := postgres.NewRepoStore(pool)
 
 	// Redis (optional)
-	// when enabled, branch heads and commit objects are cached in Redis
 	var (
 		branchStore service.BranchStore = pgBranchStore
 		commitStore service.CommitStore = pgCommitStore
@@ -68,14 +90,15 @@ func run() error {
 		redisBranchHead := redisstore.NewBranchHeadStore(rdb, cfg.Storage.Redis.BranchTTL)
 		redisCommitCache := redisstore.NewCommitCache(rdb)
 
-		branchStore = composite.NewBranchRouter(pgBranchStore, redisBranchHead)
-		commitStore = composite.NewCommitRouter(pgCommitStore, redisCommitCache)
+		branchStore = composite.NewBranchRouter(pgBranchStore, redisBranchHead, obs)
+		commitStore = composite.NewCommitRouter(pgCommitStore, redisCommitCache, obs)
 
-		log.Printf("redis: branch TTL=%s, commit cache enabled", cfg.Storage.Redis.BranchTTL)
+		logger.Info("redis: connected",
+			slog.String("branch_ttl", cfg.Storage.Redis.BranchTTL.String()),
+		)
 	}
 
 	// Neo4j (optional)
-	// when enabled, DAG traversal queries use Neo4j Cypher with postgres fallback
 	if cfg.Storage.Neo4j.Enabled {
 		driver, err := neo4jstore.NewDriver(ctx, cfg.Storage.Neo4j.URL)
 		if err != nil {
@@ -85,12 +108,9 @@ func run() error {
 
 		pgGraphStore := postgres.NewGraphStore(pool)
 		neo4jGraphStore := neo4jstore.NewGraphStore(driver)
-		_ = composite.NewGraphRouter(
-			neo4jGraphStore,
-			pgGraphStore,
-		)
+		_ = composite.NewGraphRouter(neo4jGraphStore, pgGraphStore, obs)
 
-		log.Println("neo4j: graph projection enabled")
+		logger.Info("neo4j: graph projection enabled")
 	}
 
 	// Services
@@ -104,6 +124,7 @@ func run() error {
 	// HTTP
 	if cfg.Server.HTTP.Enabled {
 		router := restv1.NewRouter(
+			obs, // observability provider
 			restv1.NewRepoHandler(repoSvc),
 			restv1.NewBranchHandler(branchSvc),
 			restv1.NewCommitHandler(commitSvc),
@@ -118,7 +139,7 @@ func run() error {
 		}
 
 		g.Go(func() error {
-			log.Printf("HTTP server listening on :%d", cfg.Server.HTTP.Port)
+			logger.Info("HTTP server listening", slog.Int("port", cfg.Server.HTTP.Port))
 			if err := httpSrv.ListenAndServe(); err != nil &&
 				!errors.Is(err, http.ErrServerClosed) {
 				return fmt.Errorf("HTTP server: %w", err)
@@ -127,7 +148,7 @@ func run() error {
 		})
 		g.Go(func() error {
 			<-gCtx.Done()
-			log.Println("HTTP server: shutting down")
+			logger.Info("HTTP server: shutting down")
 			shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer shutCancel()
 			return httpSrv.Shutdown(shutCtx)
@@ -137,6 +158,7 @@ func run() error {
 	// gRPC
 	if cfg.Server.GRPC.Enabled {
 		grpcSrv := grpcv1.NewServer(
+			obs, // observability provider
 			grpcv1.NewRepoServer(repoSvc),
 			grpcv1.NewBranchServer(branchSvc),
 			grpcv1.NewCommitServer(commitSvc),
@@ -148,7 +170,7 @@ func run() error {
 			if err != nil {
 				return fmt.Errorf("gRPC listener: %w", err)
 			}
-			log.Printf("gRPC server listening on :%d", cfg.Server.GRPC.Port)
+			logger.Info("gRPC server listening", slog.Int("port", cfg.Server.GRPC.Port))
 			if err := grpcSrv.Serve(lis); err != nil {
 				return fmt.Errorf("gRPC server: %w", err)
 			}
@@ -156,7 +178,7 @@ func run() error {
 		})
 		g.Go(func() error {
 			<-gCtx.Done()
-			log.Println("gRPC server: shutting down")
+			logger.Info("gRPC server: shutting down")
 			grpcSrv.GracefulStop()
 			return nil
 		})
@@ -168,7 +190,7 @@ func run() error {
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 		select {
 		case sig := <-quit:
-			log.Printf("received signal: %s", sig)
+			logger.Info("received signal", slog.String("signal", sig.String()))
 			cancel()
 		case <-gCtx.Done():
 		}

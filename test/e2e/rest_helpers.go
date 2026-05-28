@@ -18,6 +18,7 @@ import (
 
 	restv1 "github.com/bhpcv252/verge/internal/api/rest/v1"
 	"github.com/bhpcv252/verge/internal/domain"
+	"github.com/bhpcv252/verge/internal/observability"
 	"github.com/bhpcv252/verge/internal/service"
 	pgstore "github.com/bhpcv252/verge/internal/storage/postgres"
 	"github.com/bhpcv252/verge/testhelper"
@@ -42,7 +43,13 @@ func startE2EServer(t *testing.T, pool *pgxpool.Pool) string {
 	commitHandler := restv1.NewCommitHandler(commitSvc)
 	mergeHandler := restv1.NewMergeHandler(mergeSvc)
 
-	router := restv1.NewRouter(repoHandler, branchHandler, commitHandler, mergeHandler)
+	router := restv1.NewRouter(
+		observability.Noop(),
+		repoHandler,
+		branchHandler,
+		commitHandler,
+		mergeHandler,
+	)
 
 	// start HTTP server on random port
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

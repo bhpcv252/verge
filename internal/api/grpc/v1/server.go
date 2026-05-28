@@ -9,9 +9,11 @@ import (
 	"google.golang.org/grpc/status"
 
 	vergev1 "github.com/bhpcv252/verge/api/proto/verge/v1"
+	"github.com/bhpcv252/verge/internal/observability"
 )
 
 func NewServer(
+	obs *observability.Provider,
 	repoSvr *RepoServer,
 	branchSvr *BranchServer,
 	commitSvr *CommitServer,
@@ -20,7 +22,7 @@ func NewServer(
 	s := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			recoveryInterceptor,
-			// TODO: Add logging, tracing, auth interceptors here as the project grows.
+			observability.GRPCUnaryInterceptor(obs),
 		),
 	)
 
@@ -32,8 +34,8 @@ func NewServer(
 	return s
 }
 
-// recoveryInterceptor catches panics in any
-// RPC handler and returns an INTERNAL status error
+// recoveryInterceptor catches panics in any RPC handler and converts them to
+// a codes.Internal gRPC status error. The stack trace is printed to stderr.
 func recoveryInterceptor(
 	ctx context.Context,
 	req any,

@@ -51,18 +51,16 @@ type EventBusConfig struct {
 }
 
 type OutboxConfig struct {
-	// Source type: "polling" (default) or "debezium"
-	// polling: polls PostgreSQL outbox_events table at regular intervals
-	// debezium: reads CDC events from Kafka topic populated by Debezium connector
+	// source type: "polling" (default) or "debezium"
 	SourceType string `env:"SOURCE_TYPE" envDefault:"polling"`
 
-	// Polling source configuration (only used when SourceType=polling)
+	// polling source configuration (only used when SourceType=polling)
 	PollInterval time.Duration `env:"POLL_INTERVAL" envDefault:"500ms"`
 
-	// Batch size for all source types
+	// batch size for all source types
 	BatchSize int `env:"BATCH_SIZE" envDefault:"100"`
 
-	// Debezium source configuration (only used when SourceType=debezium)
+	// debezium source configuration (only used when SourceType=debezium)
 	DebeziumBrokers string `env:"DEBEZIUM_BROKERS"` // comma-separated, e.g. "kafka-1:9092,kafka-2:9092"
 	DebeziumTopic   string `env:"DEBEZIUM_TOPIC"    envDefault:"verge.outbox.events"`
 	DebeziumGroupID string `env:"DEBEZIUM_GROUP_ID" envDefault:"verge-worker"`
@@ -77,11 +75,29 @@ type KafkaConfig struct {
 	Topic   string `env:"TOPIC"   envDefault:"verge.events"`
 }
 
+type OTelConfig struct {
+	Enabled bool `env:"ENABLED" envDefault:"false"`
+
+	Exporter string `env:"EXPORTER" envDefault:"stdout" validate:"omitempty,oneof=stdout otlp prometheus"`
+
+	// only read when Exporter == "otlp" e.g., "otel-collector:4317"
+	OTLPEndpoint string `env:"OTLP_ENDPOINT"`
+
+	ServiceName string `env:"SERVICE_NAME" envDefault:"verge"`
+
+	SampleRate float64 `env:"SAMPLE_RATE" envDefault:"1.0" validate:"min=0,max=1"`
+
+	MetricsInterval time.Duration `env:"METRICS_INTERVAL" envDefault:"15s"`
+
+	LogLevel string `env:"LOG_LEVEL" envDefault:"info" validate:"oneof=info debug"`
+}
+
 type Config struct {
 	Server  Server       `envPrefix:"SERVER_"`
 	Storage Storage      `envPrefix:"STORAGE_"`
 	Outbox  OutboxConfig `envPrefix:"OUTBOX_"`
 	Kafka   KafkaConfig  `envPrefix:"KAFKA_"`
+	OTel    OTelConfig   `envPrefix:"OTEL_"`
 }
 
 func Load() (*Config, error) {
@@ -107,6 +123,7 @@ func validate(cfg *Config) error {
 	v.RegisterStructValidation(validateServer, Server{})
 	v.RegisterStructValidation(validateStorage, Storage{})
 	v.RegisterStructValidation(validateOutbox, OutboxConfig{})
+	v.RegisterStructValidation(validateOTel, OTelConfig{})
 
 	return v.Struct(cfg)
 }
@@ -151,5 +168,19 @@ func validateOutbox(sl validator.StructLevel) {
 
 	if o.EventBus.Enabled && o.EventBus.Type == "" {
 		sl.ReportError(o.EventBus.Type, "EventBus.Type", "type", "required-if-enabled", "")
+	}
+}
+
+func validateOTel(sl validator.StructLevel) {
+	o := sl.Current().Interface().(OTelConfig)
+
+	if o.Enabled && o.Exporter == "otlp" && o.OTLPEndpoint == "" {
+		sl.ReportError(
+			o.OTLPEndpoint,
+			"OTLPEndpoint",
+			"otlpEndpoint",
+			"required-for-otlp",
+			"",
+		)
 	}
 }

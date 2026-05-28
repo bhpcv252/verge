@@ -14,6 +14,7 @@ import (
 
 	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
+	"github.com/bhpcv252/verge/internal/observability"
 	"github.com/bhpcv252/verge/internal/service"
 	"github.com/bhpcv252/verge/testhelper"
 )
@@ -59,6 +60,7 @@ func (m *mockCommitService) GetParents(
 
 func newCommitTestRouter(svc core.CommitService) http.Handler {
 	return NewRouter(
+		observability.Noop(),
 		nil, // repoHandler
 		nil, // branchHandler
 		NewCommitHandler(svc),
