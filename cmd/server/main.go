@@ -17,6 +17,7 @@ import (
 
 	grpcv1 "github.com/bhpcv252/verge/internal/api/grpc/v1"
 	restv1 "github.com/bhpcv252/verge/internal/api/rest/v1"
+	"github.com/bhpcv252/verge/internal/auth"
 	"github.com/bhpcv252/verge/internal/config"
 	"github.com/bhpcv252/verge/internal/observability"
 	"github.com/bhpcv252/verge/internal/service"
@@ -60,6 +61,20 @@ func run() error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Auth (optional)
+	var validator *auth.Validator
+	if cfg.Auth.Enabled {
+		validator, err = auth.NewValidator(cfg.Auth.Keys)
+		if err != nil {
+			return fmt.Errorf("auth: %w", err)
+		}
+		logger.Info("auth: API key authentication enabled",
+			slog.Int("key_count", validator.Len()),
+		)
+	} else {
+		logger.Info("auth: disabled - relying on network-layer controls (mTLS, reverse proxy, etc.)")
+	}
 
 	// PostgreSQL (always required)
 	pool, err := postgres.NewPool(ctx, cfg.Storage.Postgres.URL)
@@ -124,7 +139,8 @@ func run() error {
 	// HTTP
 	if cfg.Server.HTTP.Enabled {
 		router := restv1.NewRouter(
-			obs, // observability provider
+			obs,       // observability provider
+			validator, // nil = auth disabled
 			restv1.NewRepoHandler(repoSvc),
 			restv1.NewBranchHandler(branchSvc),
 			restv1.NewCommitHandler(commitSvc),
@@ -158,7 +174,8 @@ func run() error {
 	// gRPC
 	if cfg.Server.GRPC.Enabled {
 		grpcSrv := grpcv1.NewServer(
-			obs, // observability provider
+			obs,       // observability provider
+			validator, // nil = auth disabled
 			grpcv1.NewRepoServer(repoSvc),
 			grpcv1.NewBranchServer(branchSvc),
 			grpcv1.NewCommitServer(commitSvc),

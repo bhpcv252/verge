@@ -148,6 +148,7 @@ func startServerWithConfig(t *testing.T, cfg infraConfig) *testEnv {
 
 	router := restv1.NewRouter(
 		observability.Noop(),
+		nil, // auth disabled
 		repoHandler,
 		branchHandler,
 		commitHandler,

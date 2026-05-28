@@ -6,11 +6,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/bhpcv252/verge/internal/auth"
 	"github.com/bhpcv252/verge/internal/observability"
 )
 
 func NewRouter(
 	obs *observability.Provider,
+	validator *auth.Validator, // nil = auth disabled
 	repoHandler *RepoHandler,
 	branchHandler *BranchHandler,
 	commitHandler *CommitHandler,
@@ -24,19 +26,19 @@ func NewRouter(
 	r.Use(middleware.Recoverer)
 	r.Use(observability.HTTPMiddleware(obs))
 
-	// infrastructure routes (unauthenticated, outside /v1 group)
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// PrometheusHandler is non-nil only when
-	// VERGE_OTEL_EXPORTER=prometheus;
+	// PrometheusHandler is non-nil only when VERGE_OTEL_EXPORTER=prometheus
 	if obs.PrometheusHandler != nil {
 		r.Get("/metrics", obs.PrometheusHandler.ServeHTTP)
 	}
 
 	// versioned API
 	r.Route("/v1", func(r chi.Router) {
+		r.Use(auth.HTTPMiddleware(validator, obs))
+
 		repoHandler.Mount(r)
 		branchHandler.Mount(r)
 		commitHandler.Mount(r)

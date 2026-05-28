@@ -24,6 +24,7 @@ var knownVergeKeys = map[string]struct{}{
 	"VERGE_SERVER_GRPC_ENABLED": {},
 	"VERGE_SERVER_GRPC_PORT":    {},
 
+	// Storage
 	"VERGE_STORAGE_POSTGRES_URL": {},
 
 	"VERGE_STORAGE_REDIS_ENABLED":    {},
@@ -54,6 +55,10 @@ var knownVergeKeys = map[string]struct{}{
 	"VERGE_OTEL_SAMPLE_RATE":      {},
 	"VERGE_OTEL_METRICS_INTERVAL": {},
 	"VERGE_OTEL_LOG_LEVEL":        {},
+
+	// Auth
+	"VERGE_AUTH_ENABLED": {},
+	"VERGE_AUTH_KEYS":    {},
 }
 
 // NOTE: this uses os.Unsetenv (not t.Setenv) intentionally, we want a hard
@@ -1123,6 +1128,169 @@ func TestLoad_OTel_OTLPEndpoint_StoredVerbatim(t *testing.T) {
 	}
 }
 
+// auth config
+
+func TestLoad_AuthDefaults(t *testing.T) {
+	clearVergeEnv(t)
+	setEnv(t, map[string]string{
+		"VERGE_STORAGE_POSTGRES_URL": "postgres://verge:changeme@localhost:5432/verge?sslmode=disable",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if cfg.Auth.Enabled {
+		t.Error("Auth.Enabled default: want false, got true")
+	}
+	if len(cfg.Auth.Keys) != 0 {
+		t.Errorf("Auth.Keys default: want empty slice, got %v", cfg.Auth.Keys)
+	}
+}
+
+func TestLoad_Auth_Disabled_NoKeysRequired(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_AUTH_ENABLED"] = "false"
+	// VERGE_AUTH_KEYS deliberately omitted
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error when auth is disabled with no keys, got: %v", err)
+	}
+}
+
+func TestLoad_Auth_Disabled_KeysPresentIsAllowed(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_AUTH_ENABLED"] = "false"
+	e["VERGE_AUTH_KEYS"] = "key-abc123"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error when auth is disabled with keys present, got: %v", err)
+	}
+}
+
+func TestLoad_Auth_Enabled_WithSingleKey_IsValid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_AUTH_ENABLED"] = "true"
+	e["VERGE_AUTH_KEYS"] = "key-abc123"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error with auth enabled and a key set, got: %v", err)
+	}
+	if !cfg.Auth.Enabled {
+		t.Error("Auth.Enabled: want true, got false")
+	}
+	if len(cfg.Auth.Keys) != 1 {
+		t.Fatalf("Auth.Keys: want 1 key, got %d", len(cfg.Auth.Keys))
+	}
+	if cfg.Auth.Keys[0] != "key-abc123" {
+		t.Errorf("Auth.Keys[0]: want %q, got %q", "key-abc123", cfg.Auth.Keys[0])
+	}
+}
+
+func TestLoad_Auth_Enabled_WithMultipleKeys_IsValid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_AUTH_ENABLED"] = "true"
+	e["VERGE_AUTH_KEYS"] = "key-abc123,key-def456"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error with auth enabled and multiple keys, got: %v", err)
+	}
+	if len(cfg.Auth.Keys) != 2 {
+		t.Fatalf("Auth.Keys: want 2 keys, got %d: %v", len(cfg.Auth.Keys), cfg.Auth.Keys)
+	}
+	if cfg.Auth.Keys[0] != "key-abc123" {
+		t.Errorf("Auth.Keys[0]: want %q, got %q", "key-abc123", cfg.Auth.Keys[0])
+	}
+	if cfg.Auth.Keys[1] != "key-def456" {
+		t.Errorf("Auth.Keys[1]: want %q, got %q", "key-def456", cfg.Auth.Keys[1])
+	}
+}
+
+func TestLoad_Auth_Enabled_NoKeys_IsRejected(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_AUTH_ENABLED"] = "true"
+	// VERGE_AUTH_KEYS deliberately omitted
+	setEnv(t, e)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when auth is enabled but no keys are provided")
+	}
+}
+
+func TestLoad_Auth_Enabled_EmptyKeys_IsRejected(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_AUTH_ENABLED"] = "true"
+	e["VERGE_AUTH_KEYS"] = ""
+	setEnv(t, e)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when auth is enabled but VERGE_AUTH_KEYS is empty")
+	}
+}
+
+func TestLoad_Auth_Enabled_WhitespaceOnlyKeys_IsRejected(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_AUTH_ENABLED"] = "true"
+	e["VERGE_AUTH_KEYS"] = "   "
+	setEnv(t, e)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when auth is enabled but keys contain only whitespace")
+	}
+}
+
+func TestLoad_Auth_Enabled_DirectValidate_IsRejected(t *testing.T) {
+	cfg := &Config{
+		Server: Server{
+			HTTP: HTTP{Enabled: true, Port: 8080},
+			GRPC: GRPC{Enabled: false, Port: 9090},
+		},
+		Storage: Storage{
+			Postgres: PGConfig{URL: "postgres://u:p@localhost:5432/db?sslmode=disable"},
+		},
+		Outbox: OutboxConfig{
+			SourceType:   "polling",
+			PollInterval: 500 * time.Millisecond,
+			BatchSize:    100,
+			EventBus:     EventBusConfig{Type: "kafka"},
+		},
+		OTel: OTelConfig{
+			Exporter:        "stdout",
+			ServiceName:     "verge",
+			SampleRate:      1.0,
+			MetricsInterval: 15 * time.Second,
+			LogLevel:        "info",
+		},
+		Auth: AuthConfig{
+			Enabled: true,
+			Keys:    nil, // no keys - must be rejected
+		},
+	}
+
+	if err := validate(cfg); err == nil {
+		t.Fatal("expected error when auth is enabled with nil keys")
+	}
+}
+
 // full config round-trip
 
 func TestLoad_FullValidConfig(t *testing.T) {
@@ -1155,6 +1323,9 @@ func TestLoad_FullValidConfig(t *testing.T) {
 		"VERGE_OTEL_SAMPLE_RATE":      "0.5",
 		"VERGE_OTEL_METRICS_INTERVAL": "30s",
 		"VERGE_OTEL_LOG_LEVEL":        "debug",
+
+		"VERGE_AUTH_ENABLED": "true",
+		"VERGE_AUTH_KEYS":    "key-prod-primary,key-prod-secondary",
 	})
 
 	cfg, err := Load()
@@ -1233,6 +1404,20 @@ func TestLoad_FullValidConfig(t *testing.T) {
 	}
 	if cfg.OTel.LogLevel != "debug" {
 		t.Errorf("OTel.LogLevel: want %q, got %q", "debug", cfg.OTel.LogLevel)
+	}
+
+	// auth
+	if !cfg.Auth.Enabled {
+		t.Error("Auth.Enabled: want true, got false")
+	}
+	if len(cfg.Auth.Keys) != 2 {
+		t.Fatalf("Auth.Keys: want 2 keys, got %d: %v", len(cfg.Auth.Keys), cfg.Auth.Keys)
+	}
+	if cfg.Auth.Keys[0] != "key-prod-primary" {
+		t.Errorf("Auth.Keys[0]: want %q, got %q", "key-prod-primary", cfg.Auth.Keys[0])
+	}
+	if cfg.Auth.Keys[1] != "key-prod-secondary" {
+		t.Errorf("Auth.Keys[1]: want %q, got %q", "key-prod-secondary", cfg.Auth.Keys[1])
 	}
 }
 

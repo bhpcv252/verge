@@ -53,6 +53,13 @@ func TestNewMetrics_AllOutboxInstrumentsCreated(t *testing.T) {
 	assert.NotNil(t, m.OutboxBatchSize, "OutboxBatchSize")
 }
 
+func TestNewMetrics_AllAuthInstrumentsCreated(t *testing.T) {
+	m, err := newMetrics(otel.GetMeterProvider().Meter("verge"))
+	require.NoError(t, err)
+
+	assert.NotNil(t, m.AuthFailuresTotal, "AuthFailuresTotal")
+}
+
 func TestNewMetrics_CalledTwice_DoesNotError(t *testing.T) {
 	meter := otel.GetMeterProvider().Meter("verge-metrics-test")
 	m1, err := newMetrics(meter)
@@ -88,5 +95,7 @@ func TestMetrics_AllInstrumentsCallable(t *testing.T) {
 		obs.Metrics.OutboxPollDuration.Record(ctx, 0.5)
 		obs.Metrics.OutboxLagEvents.Record(ctx, 42)
 		obs.Metrics.OutboxBatchSize.Record(ctx, 10)
+
+		obs.Metrics.AuthFailuresTotal.Add(ctx, 1)
 	})
 }

@@ -61,6 +61,7 @@ func (m *mockCommitService) GetParents(
 func newCommitTestRouter(svc core.CommitService) http.Handler {
 	return NewRouter(
 		observability.Noop(),
+		nil, // auth disabled
 		nil, // repoHandler
 		nil, // branchHandler
 		NewCommitHandler(svc),

@@ -36,6 +36,7 @@ func (m *mockMergeService) CreateMerge(
 func newMergeTestRouter(svc core.MergeService) http.Handler {
 	return NewRouter(
 		observability.Noop(),
+		nil, // auth disabled
 		nil, // repoHandler
 		nil, // branchHandler
 		nil, // commitHandler

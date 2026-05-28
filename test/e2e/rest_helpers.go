@@ -45,6 +45,7 @@ func startE2EServer(t *testing.T, pool *pgxpool.Pool) string {
 
 	router := restv1.NewRouter(
 		observability.Noop(),
+		nil, // auth disabled
 		repoHandler,
 		branchHandler,
 		commitHandler,
