@@ -55,7 +55,7 @@ func (s *DebeziumSource) Next(ctx context.Context) ([]OutboxEvent, error) {
 	var events []OutboxEvent
 	s.pendingCommits = s.pendingCommits[:0] // clear previous batch
 
-	// fetch first message — blocks until one arrives
+	// fetch first message - blocks until one arrives
 	firstMsg, err := s.reader.FetchMessage(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -91,7 +91,7 @@ func (s *DebeziumSource) Next(ctx context.Context) ([]OutboxEvent, error) {
 
 		if err != nil {
 			if fetchCtx.Err() != nil || err == context.DeadlineExceeded {
-				break // no more messages ready right now — return what we have
+				break // no more messages ready right now - return what we have
 			}
 			if ctx.Err() != nil {
 				break

@@ -65,6 +65,7 @@ func (m *mockBranchService) DeleteBranch(ctx context.Context, repoID, name strin
 func newBranchTestRouter(svc core.BranchService) http.Handler {
 	return NewRouter(
 		observability.Noop(),
+		nil, // auth disabled
 		nil, // repoHandler
 		NewBranchHandler(svc),
 		nil, // commitHandler

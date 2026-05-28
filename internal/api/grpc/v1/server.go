@@ -9,21 +9,31 @@ import (
 	"google.golang.org/grpc/status"
 
 	vergev1 "github.com/bhpcv252/verge/api/proto/verge/v1"
+	"github.com/bhpcv252/verge/internal/auth"
 	"github.com/bhpcv252/verge/internal/observability"
 )
 
 func NewServer(
 	obs *observability.Provider,
+	validator *auth.Validator, // nil = auth disabled
 	repoSvr *RepoServer,
 	branchSvr *BranchServer,
 	commitSvr *CommitServer,
 	mergeSvr *MergeServer,
 ) *grpc.Server {
+	unaryInterceptors := []grpc.UnaryServerInterceptor{
+		recoveryInterceptor,
+		auth.UnaryInterceptor(validator), // no-op when validator is nil
+		observability.GRPCUnaryInterceptor(obs),
+	}
+
+	streamInterceptors := []grpc.StreamServerInterceptor{
+		auth.StreamInterceptor(validator), // no-op when validator is nil
+	}
+
 	s := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			recoveryInterceptor,
-			observability.GRPCUnaryInterceptor(obs),
-		),
+		grpc.ChainUnaryInterceptor(unaryInterceptors...),
+		grpc.ChainStreamInterceptor(streamInterceptors...),
 	)
 
 	vergev1.RegisterRepositoryServiceServer(s, repoSvr)
@@ -34,8 +44,6 @@ func NewServer(
 	return s
 }
 
-// recoveryInterceptor catches panics in any RPC handler and converts them to
-// a codes.Internal gRPC status error. The stack trace is printed to stderr.
 func recoveryInterceptor(
 	ctx context.Context,
 	req any,

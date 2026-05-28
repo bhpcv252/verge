@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v10"
@@ -92,12 +93,19 @@ type OTelConfig struct {
 	LogLevel string `env:"LOG_LEVEL" envDefault:"info" validate:"oneof=info debug"`
 }
 
+// when enabled, every /v1 request and gRPC call requires: Authorization: Bearer <key>
+type AuthConfig struct {
+	Enabled bool     `env:"ENABLED" envDefault:"false"`
+	Keys    []string `env:"KEYS"                       envSeparator:","`
+}
+
 type Config struct {
 	Server  Server       `envPrefix:"SERVER_"`
 	Storage Storage      `envPrefix:"STORAGE_"`
 	Outbox  OutboxConfig `envPrefix:"OUTBOX_"`
 	Kafka   KafkaConfig  `envPrefix:"KAFKA_"`
 	OTel    OTelConfig   `envPrefix:"OTEL_"`
+	Auth    AuthConfig   `envPrefix:"AUTH_"`
 }
 
 func Load() (*Config, error) {
@@ -124,6 +132,7 @@ func validate(cfg *Config) error {
 	v.RegisterStructValidation(validateStorage, Storage{})
 	v.RegisterStructValidation(validateOutbox, OutboxConfig{})
 	v.RegisterStructValidation(validateOTel, OTelConfig{})
+	v.RegisterStructValidation(validateAuth, AuthConfig{})
 
 	return v.Struct(cfg)
 }
@@ -180,6 +189,30 @@ func validateOTel(sl validator.StructLevel) {
 			"OTLPEndpoint",
 			"otlpEndpoint",
 			"required-for-otlp",
+			"",
+		)
+	}
+}
+
+func validateAuth(sl validator.StructLevel) {
+	a := sl.Current().Interface().(AuthConfig)
+
+	if !a.Enabled {
+		return
+	}
+
+	nonBlank := 0
+	for _, k := range a.Keys {
+		if strings.TrimSpace(k) != "" {
+			nonBlank++
+		}
+	}
+	if nonBlank == 0 {
+		sl.ReportError(
+			a.Keys,
+			"Keys",
+			"keys",
+			"required-when-auth-enabled",
 			"",
 		)
 	}

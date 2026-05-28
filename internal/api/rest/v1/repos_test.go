@@ -50,6 +50,7 @@ func (m *mockRepoService) ListRepos(
 func newTestRouter(svc core.RepoService) http.Handler {
 	return NewRouter(
 		observability.Noop(),
+		nil, // auth disabled
 		NewRepoHandler(svc),
 		nil, // branchHandler
 		nil, // commitHandler
