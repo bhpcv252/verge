@@ -10,9 +10,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bhpcv252/verge/internal/domain"
+	"github.com/bhpcv252/verge/internal/observability"
 	"github.com/bhpcv252/verge/internal/storage/interfaces"
 	"github.com/bhpcv252/verge/internal/storage/postgres"
 )
+
+func newTestRouter(pg pgBranchDelegate, redis interfaces.BranchHeadStore) *BranchRouter {
+	return NewBranchRouter(pg, redis, observability.Noop())
+}
 
 // mocks
 
@@ -112,7 +117,7 @@ func makeBranch(repoID, name, commitID string) *domain.Branch {
 func TestBranchRouter_GetHead_CacheHit_ReturnsCachedValue(t *testing.T) {
 	redis := &stubRedisHead{getHeadResult: "commit-from-redis"}
 	pg := &stubPGBranch{}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	commitID, err := r.GetHead(context.Background(), "repo-1", "main")
 
@@ -127,7 +132,7 @@ func TestBranchRouter_GetHead_CacheHit_ReturnsCachedValue(t *testing.T) {
 func TestBranchRouter_GetHead_CacheMiss_FallsBackToPostgres(t *testing.T) {
 	redis := &stubRedisHead{getHeadErr: interfaces.ErrCacheMiss}
 	pg := &stubPGBranch{getByNameResult: makeBranch("repo-1", "main", "commit-from-pg")}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	commitID, err := r.GetHead(context.Background(), "repo-1", "main")
 
@@ -139,7 +144,7 @@ func TestBranchRouter_GetHead_CacheMiss_FallsBackToPostgres(t *testing.T) {
 func TestBranchRouter_GetHead_CacheMiss_PopulatesRedis(t *testing.T) {
 	redis := &stubRedisHead{getHeadErr: interfaces.ErrCacheMiss}
 	pg := &stubPGBranch{getByNameResult: makeBranch("repo-1", "main", "commit-abc")}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	_, err := r.GetHead(context.Background(), "repo-1", "main")
 
@@ -154,7 +159,7 @@ func TestBranchRouter_GetHead_CacheMiss_SetHeadFails_StillReturnsPGValue(t *test
 		setHeadErr: errors.New("redis down"),
 	}
 	pg := &stubPGBranch{getByNameResult: makeBranch("repo-1", "main", "commit-abc")}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	commitID, err := r.GetHead(context.Background(), "repo-1", "main")
 
@@ -166,7 +171,7 @@ func TestBranchRouter_GetHead_CacheMiss_PostgresFails_ReturnsError(t *testing.T)
 	pgErr := errors.New("postgres connection lost")
 	redis := &stubRedisHead{getHeadErr: interfaces.ErrCacheMiss}
 	pg := &stubPGBranch{getByNameErr: pgErr}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	_, err := r.GetHead(context.Background(), "repo-1", "main")
 
@@ -180,7 +185,7 @@ func TestBranchRouter_GetHead_CacheMiss_PostgresFails_ReturnsError(t *testing.T)
 func TestBranchRouter_GetHead_RedisError_FallsBackToPostgres(t *testing.T) {
 	redis := &stubRedisHead{getHeadErr: errors.New("connection refused")} // not ErrCacheMiss
 	pg := &stubPGBranch{getByNameResult: makeBranch("repo-1", "main", "commit-pg")}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	commitID, err := r.GetHead(context.Background(), "repo-1", "main")
 
@@ -192,7 +197,7 @@ func TestBranchRouter_GetHead_RedisError_FallsBackToPostgres(t *testing.T) {
 func TestBranchRouter_GetHead_RedisError_StillTriesToSetHead(t *testing.T) {
 	redis := &stubRedisHead{getHeadErr: errors.New("timeout")}
 	pg := &stubPGBranch{getByNameResult: makeBranch("repo-1", "main", "commit-pg")}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	_, _ = r.GetHead(context.Background(), "repo-1", "main")
 
@@ -203,7 +208,7 @@ func TestBranchRouter_GetHead_RedisError_StillTriesToSetHead(t *testing.T) {
 
 func TestBranchRouter_SetHead_DelegatesToRedis(t *testing.T) {
 	redis := &stubRedisHead{}
-	r := NewBranchRouter(&stubPGBranch{}, redis)
+	r := newTestRouter(&stubPGBranch{}, redis)
 
 	err := r.SetHead(context.Background(), "repo-1", "main", "commit-new", 1000)
 
@@ -218,7 +223,7 @@ func TestBranchRouter_SetHead_DelegatesToRedis(t *testing.T) {
 
 func TestBranchRouter_SetHead_RedisError_IsReturned(t *testing.T) {
 	redis := &stubRedisHead{setHeadErr: errors.New("redis write failed")}
-	r := NewBranchRouter(&stubPGBranch{}, redis)
+	r := newTestRouter(&stubPGBranch{}, redis)
 
 	err := r.SetHead(context.Background(), "repo-1", "main", "commit-new", 1000)
 
@@ -230,7 +235,7 @@ func TestBranchRouter_SetHead_RedisError_IsReturned(t *testing.T) {
 func TestBranchRouter_Advance_PostgresSucceeds_ReturnsBranch(t *testing.T) {
 	want := makeBranch("repo-1", "main", "commit-new")
 	pg := &stubPGBranch{advanceResult: want}
-	r := NewBranchRouter(pg, &stubRedisHead{})
+	r := newTestRouter(pg, &stubRedisHead{})
 
 	got, err := r.Advance(context.Background(), "repo-1", "main", "commit-new", "commit-old")
 
@@ -241,7 +246,7 @@ func TestBranchRouter_Advance_PostgresSucceeds_ReturnsBranch(t *testing.T) {
 func TestBranchRouter_Advance_PostgresSucceeds_SyncsRedis(t *testing.T) {
 	pg := &stubPGBranch{advanceResult: makeBranch("repo-1", "main", "commit-new")}
 	redis := &stubRedisHead{}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	_, err := r.Advance(context.Background(), "repo-1", "main", "commit-new", "commit-old")
 
@@ -253,7 +258,7 @@ func TestBranchRouter_Advance_PostgresSucceeds_SyncsRedis(t *testing.T) {
 func TestBranchRouter_Advance_RedisSetHeadFails_BranchStillReturned(t *testing.T) {
 	pg := &stubPGBranch{advanceResult: makeBranch("repo-1", "main", "commit-new")}
 	redis := &stubRedisHead{setHeadErr: errors.New("redis unavailable")}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	got, err := r.Advance(context.Background(), "repo-1", "main", "commit-new", "commit-old")
 
@@ -265,7 +270,7 @@ func TestBranchRouter_Advance_PostgresFails_ReturnsError(t *testing.T) {
 	pgErr := errors.New("branch conflict")
 	pg := &stubPGBranch{advanceErr: pgErr}
 	redis := &stubRedisHead{}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	_, err := r.Advance(context.Background(), "repo-1", "main", "commit-new", "commit-old")
 
@@ -278,7 +283,7 @@ func TestBranchRouter_Advance_PostgresFails_ReturnsError(t *testing.T) {
 
 func TestBranchRouter_Create_DelegatesToPostgres(t *testing.T) {
 	pg := &stubPGBranch{}
-	r := NewBranchRouter(pg, &stubRedisHead{})
+	r := newTestRouter(pg, &stubRedisHead{})
 
 	err := r.Create(context.Background(), makeBranch("repo-1", "feat", "c1"))
 
@@ -289,7 +294,7 @@ func TestBranchRouter_Create_DelegatesToPostgres(t *testing.T) {
 func TestBranchRouter_GetByName_DelegatesToPostgres(t *testing.T) {
 	want := makeBranch("repo-1", "main", "c1")
 	pg := &stubPGBranch{getByNameResult: want}
-	r := NewBranchRouter(pg, &stubRedisHead{})
+	r := newTestRouter(pg, &stubRedisHead{})
 
 	got, err := r.GetByName(context.Background(), "repo-1", "main")
 
@@ -301,7 +306,7 @@ func TestBranchRouter_GetByName_DelegatesToPostgres(t *testing.T) {
 func TestBranchRouter_List_DelegatesToPostgres(t *testing.T) {
 	want := &postgres.ListBranchesPage{Branches: []*domain.Branch{makeBranch("r1", "main", "c1")}}
 	pg := &stubPGBranch{listResult: want}
-	r := NewBranchRouter(pg, &stubRedisHead{})
+	r := newTestRouter(pg, &stubRedisHead{})
 
 	got, err := r.List(context.Background(), "r1", 10, "")
 
@@ -312,7 +317,8 @@ func TestBranchRouter_List_DelegatesToPostgres(t *testing.T) {
 
 func TestBranchRouter_Delete_DelegatesToPostgres(t *testing.T) {
 	pg := &stubPGBranch{}
-	r := NewBranchRouter(pg, &stubRedisHead{})
+	redis := &stubRedisHead{}
+	r := newTestRouter(pg, redis)
 
 	err := r.Delete(context.Background(), "repo-1", "feat")
 
@@ -326,7 +332,7 @@ func TestBranchRouter_DelegateMethods_NeverTouchRedis(t *testing.T) {
 		listResult:      &postgres.ListBranchesPage{},
 		getByNameResult: makeBranch("r", "m", "c"),
 	}
-	r := NewBranchRouter(pg, redis)
+	r := newTestRouter(pg, redis)
 
 	_ = r.Create(context.Background(), makeBranch("r", "feat", "c"))
 	_, _ = r.GetByName(context.Background(), "r", "m")

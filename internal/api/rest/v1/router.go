@@ -5,9 +5,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/bhpcv252/verge/internal/observability"
 )
 
 func NewRouter(
+	obs *observability.Provider,
 	repoHandler *RepoHandler,
 	branchHandler *BranchHandler,
 	commitHandler *CommitHandler,
@@ -15,17 +18,24 @@ func NewRouter(
 ) http.Handler {
 	r := chi.NewRouter()
 
-	// middleware
-	r.Use(middleware.RequestID) // X-Request-ID header on every response
-	r.Use(middleware.RealIP)    // Reads X-Forwarded-For / X-Real-IP
-	r.Use(middleware.Recoverer) // Catch panics; return 500 instead of crashing
+	// core chi middleware, order matters
+	r.Use(middleware.RequestID) // must come first; HTTPMiddleware reads the ID it sets
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Recoverer)
+	r.Use(observability.HTTPMiddleware(obs))
 
-	// health (unauthenticated)
+	// infrastructure routes (unauthenticated, outside /v1 group)
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// v1 API
+	// PrometheusHandler is non-nil only when
+	// VERGE_OTEL_EXPORTER=prometheus;
+	if obs.PrometheusHandler != nil {
+		r.Get("/metrics", obs.PrometheusHandler.ServeHTTP)
+	}
+
+	// versioned API
 	r.Route("/v1", func(r chi.Router) {
 		repoHandler.Mount(r)
 		branchHandler.Mount(r)

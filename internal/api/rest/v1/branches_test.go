@@ -13,6 +13,7 @@ import (
 
 	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
+	"github.com/bhpcv252/verge/internal/observability"
 	"github.com/bhpcv252/verge/internal/service"
 	"github.com/bhpcv252/verge/testhelper"
 )
@@ -63,6 +64,7 @@ func (m *mockBranchService) DeleteBranch(ctx context.Context, repoID, name strin
 
 func newBranchTestRouter(svc core.BranchService) http.Handler {
 	return NewRouter(
+		observability.Noop(),
 		nil, // repoHandler
 		NewBranchHandler(svc),
 		nil, // commitHandler

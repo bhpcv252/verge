@@ -10,9 +10,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bhpcv252/verge/internal/domain"
+	"github.com/bhpcv252/verge/internal/observability"
 	"github.com/bhpcv252/verge/internal/storage/interfaces"
 	"github.com/bhpcv252/verge/internal/storage/postgres"
 )
+
+func newTestCommitRouter(pg pgCommitDelegate, cache interfaces.CommitCache) *CommitRouter {
+	return NewCommitRouter(pg, cache, observability.Noop())
+}
 
 // mocks
 
@@ -119,7 +124,7 @@ func TestCommitRouter_GetByID_CacheHit_ReturnsCachedCommit(t *testing.T) {
 	want := makeCommit("c1", "r1")
 	cache := &stubCommitCache{getResult: want}
 	pg := &stubPGCommit{}
-	r := NewCommitRouter(pg, cache)
+	r := newTestCommitRouter(pg, cache)
 
 	got, err := r.GetByID(context.Background(), "r1", "c1")
 
@@ -133,7 +138,7 @@ func TestCommitRouter_GetByID_CacheHit_ReturnsCachedCommit(t *testing.T) {
 func TestCommitRouter_GetByID_CacheMiss_FallsBackToPostgres(t *testing.T) {
 	cache := &stubCommitCache{getErr: interfaces.ErrCacheMiss}
 	pg := &stubPGCommit{getByIDResult: makeCommit("c1", "r1")}
-	r := NewCommitRouter(pg, cache)
+	r := newTestCommitRouter(pg, cache)
 
 	got, err := r.GetByID(context.Background(), "r1", "c1")
 
@@ -145,7 +150,7 @@ func TestCommitRouter_GetByID_CacheMiss_FallsBackToPostgres(t *testing.T) {
 func TestCommitRouter_GetByID_CacheMiss_PopulatesCache(t *testing.T) {
 	cache := &stubCommitCache{getErr: interfaces.ErrCacheMiss}
 	pg := &stubPGCommit{getByIDResult: makeCommit("c1", "r1")}
-	r := NewCommitRouter(pg, cache)
+	r := newTestCommitRouter(pg, cache)
 
 	_, err := r.GetByID(context.Background(), "r1", "c1")
 
@@ -159,7 +164,7 @@ func TestCommitRouter_GetByID_CacheMiss_SetCommitFails_StillReturnsPGValue(t *te
 		setErr: errors.New("redis full"),
 	}
 	pg := &stubPGCommit{getByIDResult: makeCommit("c1", "r1")}
-	r := NewCommitRouter(pg, cache)
+	r := newTestCommitRouter(pg, cache)
 
 	got, err := r.GetByID(context.Background(), "r1", "c1")
 
@@ -170,18 +175,14 @@ func TestCommitRouter_GetByID_CacheMiss_SetCommitFails_StillReturnsPGValue(t *te
 func TestCommitRouter_GetByID_CacheMiss_PostgresNotFound_ReturnsError(t *testing.T) {
 	cache := &stubCommitCache{getErr: interfaces.ErrCacheMiss}
 	pg := &stubPGCommit{getByIDErr: domain.ErrCommitNotFound}
-	r := NewCommitRouter(pg, cache)
+	r := newTestCommitRouter(pg, cache)
 
 	_, err := r.GetByID(context.Background(), "r1", "c-nonexistent")
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, domain.ErrCommitNotFound)
-	assert.Equal(
-		t,
-		0,
-		cache.setCalls,
-		"SetCommit must not be called when postgres returns not-found",
-	)
+	assert.Equal(t, 0, cache.setCalls,
+		"SetCommit must not be called when postgres returns not-found")
 }
 
 // GetByID - cache error (not a miss)
@@ -189,7 +190,7 @@ func TestCommitRouter_GetByID_CacheMiss_PostgresNotFound_ReturnsError(t *testing
 func TestCommitRouter_GetByID_CacheError_FallsBackToPostgres(t *testing.T) {
 	cache := &stubCommitCache{getErr: errors.New("connection refused")} // not ErrCacheMiss
 	pg := &stubPGCommit{getByIDResult: makeCommit("c1", "r1")}
-	r := NewCommitRouter(pg, cache)
+	r := newTestCommitRouter(pg, cache)
 
 	got, err := r.GetByID(context.Background(), "r1", "c1")
 
@@ -201,7 +202,7 @@ func TestCommitRouter_GetByID_CacheError_FallsBackToPostgres(t *testing.T) {
 func TestCommitRouter_GetByID_CacheError_StillTriesToSetCommit(t *testing.T) {
 	cache := &stubCommitCache{getErr: errors.New("timeout")}
 	pg := &stubPGCommit{getByIDResult: makeCommit("c1", "r1")}
-	r := NewCommitRouter(pg, cache)
+	r := newTestCommitRouter(pg, cache)
 
 	_, _ = r.GetByID(context.Background(), "r1", "c1")
 
@@ -213,7 +214,7 @@ func TestCommitRouter_GetByID_CacheError_StillTriesToSetCommit(t *testing.T) {
 func TestCommitRouter_Create_DelegatesToPostgres(t *testing.T) {
 	commit := makeCommit("c1", "r1")
 	pg := &stubPGCommit{createResult: commit}
-	r := NewCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
+	r := newTestCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
 
 	got, err := r.Create(context.Background(), commit, []string{})
 
@@ -225,7 +226,7 @@ func TestCommitRouter_Create_DelegatesToPostgres(t *testing.T) {
 func TestCommitRouter_GetByIdempotencyKey_DelegatesToPostgres(t *testing.T) {
 	want := makeCommit("c1", "r1")
 	pg := &stubPGCommit{getByIKResult: want}
-	r := NewCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
+	r := newTestCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
 
 	got, err := r.GetByIdempotencyKey(context.Background(), "r1", "idem-key")
 
@@ -237,7 +238,7 @@ func TestCommitRouter_GetByIdempotencyKey_DelegatesToPostgres(t *testing.T) {
 func TestCommitRouter_List_DelegatesToPostgres(t *testing.T) {
 	want := &postgres.ListCommitsPage{Commits: []*domain.Commit{makeCommit("c1", "r1")}}
 	pg := &stubPGCommit{listResult: want}
-	r := NewCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
+	r := newTestCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
 
 	got, err := r.List(context.Background(), postgres.ListCommitsFilter{RepoID: "r1", Limit: 10})
 
@@ -249,7 +250,7 @@ func TestCommitRouter_List_DelegatesToPostgres(t *testing.T) {
 func TestCommitRouter_GetParents_DelegatesToPostgres(t *testing.T) {
 	want := []*domain.Commit{makeCommit("p1", "r1")}
 	pg := &stubPGCommit{getParentsResult: want}
-	r := NewCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
+	r := newTestCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
 
 	got, err := r.GetParents(context.Background(), "r1", "c1")
 
@@ -260,7 +261,7 @@ func TestCommitRouter_GetParents_DelegatesToPostgres(t *testing.T) {
 
 func TestCommitRouter_ValidateParentsExist_DelegatesToPostgres(t *testing.T) {
 	pg := &stubPGCommit{}
-	r := NewCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
+	r := newTestCommitRouter(pg, &stubCommitCache{getErr: interfaces.ErrCacheMiss})
 
 	err := r.ValidateParentsExist(context.Background(), "r1", []string{"p1", "p2"})
 
@@ -274,7 +275,7 @@ func TestCommitRouter_DelegateMethods_NeverTouchCache(t *testing.T) {
 		listResult:       &postgres.ListCommitsPage{},
 		getParentsResult: []*domain.Commit{},
 	}
-	r := NewCommitRouter(pg, cache)
+	r := newTestCommitRouter(pg, cache)
 
 	_, _ = r.Create(context.Background(), makeCommit("c1", "r1"), []string{})
 	_, _ = r.GetByIdempotencyKey(context.Background(), "r1", "key")

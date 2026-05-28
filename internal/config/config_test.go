@@ -34,17 +34,26 @@ var knownVergeKeys = map[string]struct{}{
 	"VERGE_STORAGE_NEO4J_URL":     {},
 
 	// Outbox worker
-	"VERGE_OUTBOX_SOURCE_TYPE":       {}, // NEW: "polling" or "debezium"
+	"VERGE_OUTBOX_SOURCE_TYPE":       {},
 	"VERGE_OUTBOX_POLL_INTERVAL":     {},
 	"VERGE_OUTBOX_BATCH_SIZE":        {},
 	"VERGE_OUTBOX_EVENTBUS_ENABLED":  {},
 	"VERGE_OUTBOX_EVENTBUS_TYPE":     {},
-	"VERGE_OUTBOX_DEBEZIUM_BROKERS":  {}, // NEW
-	"VERGE_OUTBOX_DEBEZIUM_TOPIC":    {}, // NEW
-	"VERGE_OUTBOX_DEBEZIUM_GROUP_ID": {}, // NEW
+	"VERGE_OUTBOX_DEBEZIUM_BROKERS":  {},
+	"VERGE_OUTBOX_DEBEZIUM_TOPIC":    {},
+	"VERGE_OUTBOX_DEBEZIUM_GROUP_ID": {},
 
 	"VERGE_KAFKA_BROKERS": {},
 	"VERGE_KAFKA_TOPIC":   {},
+
+	// OpenTelemetry observability
+	"VERGE_OTEL_ENABLED":          {},
+	"VERGE_OTEL_EXPORTER":         {},
+	"VERGE_OTEL_OTLP_ENDPOINT":    {},
+	"VERGE_OTEL_SERVICE_NAME":     {},
+	"VERGE_OTEL_SAMPLE_RATE":      {},
+	"VERGE_OTEL_METRICS_INTERVAL": {},
+	"VERGE_OTEL_LOG_LEVEL":        {},
 }
 
 // NOTE: this uses os.Unsetenv (not t.Setenv) intentionally, we want a hard
@@ -198,6 +207,40 @@ func TestLoad_KafkaDefaults(t *testing.T) {
 	}
 	if cfg.Kafka.Brokers != "" {
 		t.Errorf("Kafka.Brokers default: want empty string, got %q", cfg.Kafka.Brokers)
+	}
+}
+
+func TestLoad_OTelDefaults(t *testing.T) {
+	clearVergeEnv(t)
+	setEnv(t, map[string]string{
+		"VERGE_STORAGE_POSTGRES_URL": "postgres://verge:changeme@localhost:5432/verge?sslmode=disable",
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if cfg.OTel.Enabled {
+		t.Error("OTel.Enabled default: want false, got true")
+	}
+	if cfg.OTel.Exporter != "stdout" {
+		t.Errorf("OTel.Exporter default: want %q, got %q", "stdout", cfg.OTel.Exporter)
+	}
+	if cfg.OTel.OTLPEndpoint != "" {
+		t.Errorf("OTel.OTLPEndpoint default: want empty, got %q", cfg.OTel.OTLPEndpoint)
+	}
+	if cfg.OTel.ServiceName != "verge" {
+		t.Errorf("OTel.ServiceName default: want %q, got %q", "verge", cfg.OTel.ServiceName)
+	}
+	if cfg.OTel.SampleRate != 1.0 {
+		t.Errorf("OTel.SampleRate default: want 1.0, got %f", cfg.OTel.SampleRate)
+	}
+	if cfg.OTel.MetricsInterval != 15*time.Second {
+		t.Errorf("OTel.MetricsInterval default: want 15s, got %s", cfg.OTel.MetricsInterval)
+	}
+	if cfg.OTel.LogLevel != "info" {
+		t.Errorf("OTel.LogLevel default: want %q, got %q", "info", cfg.OTel.LogLevel)
 	}
 }
 
@@ -784,8 +827,6 @@ func TestLoad_OutboxEventBus_EnabledCustomType_IsAllowed(t *testing.T) {
 }
 
 func TestLoad_OutboxEventBus_EnabledEmptyType_IsInvalid(t *testing.T) {
-	// Construct the config directly to test validation in isolation.
-	// SourceType must be valid to isolate the EventBus.Type check.
 	cfg := &Config{
 		Server: Server{
 			HTTP: HTTP{Enabled: true, Port: 8080},
@@ -795,13 +836,20 @@ func TestLoad_OutboxEventBus_EnabledEmptyType_IsInvalid(t *testing.T) {
 			Postgres: PGConfig{URL: "postgres://u:p@localhost:5432/db?sslmode=disable"},
 		},
 		Outbox: OutboxConfig{
-			SourceType:   "polling", // must be valid to reach EventBus check
+			SourceType:   "polling",
 			PollInterval: 500 * time.Millisecond,
 			BatchSize:    100,
 			EventBus: EventBusConfig{
 				Enabled: true,
-				Type:    "", // explicitly empty - this is what we're testing
+				Type:    "", // explicitly empty
 			},
+		},
+		OTel: OTelConfig{
+			Exporter:        "stdout",
+			ServiceName:     "verge",
+			SampleRate:      1.0,
+			MetricsInterval: 15 * time.Second,
+			LogLevel:        "info",
 		},
 	}
 
@@ -855,6 +903,226 @@ func TestLoad_KafkaCustomValues(t *testing.T) {
 	}
 }
 
+// OTel config
+
+func TestLoad_OTel_Disabled_OtherFieldsIgnored(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_ENABLED"] = "false"
+	// OTLP endpoint deliberately absent even though exporter=otlp would normally require it
+	e["VERGE_OTEL_EXPORTER"] = "otlp"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error when OTel is disabled, got: %v", err)
+	}
+}
+
+func TestLoad_OTel_Enabled_StdoutExporter_IsValid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_ENABLED"] = "true"
+	e["VERGE_OTEL_EXPORTER"] = "stdout"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("exporter=stdout should be valid, got: %v", err)
+	}
+}
+
+func TestLoad_OTel_Enabled_PrometheusExporter_IsValid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_ENABLED"] = "true"
+	e["VERGE_OTEL_EXPORTER"] = "prometheus"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("exporter=prometheus should be valid, got: %v", err)
+	}
+}
+
+func TestLoad_OTel_Enabled_OTLPExporter_WithEndpoint_IsValid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_ENABLED"] = "true"
+	e["VERGE_OTEL_EXPORTER"] = "otlp"
+	e["VERGE_OTEL_OTLP_ENDPOINT"] = "otel-collector:4317"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err != nil {
+		t.Fatalf("exporter=otlp with endpoint set should be valid, got: %v", err)
+	}
+}
+
+func TestLoad_OTel_Enabled_OTLPExporter_WithoutEndpoint_IsInvalid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_ENABLED"] = "true"
+	e["VERGE_OTEL_EXPORTER"] = "otlp"
+	// VERGE_OTEL_OTLP_ENDPOINT deliberately omitted
+	setEnv(t, e)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error when exporter=otlp but OTLP_ENDPOINT is empty")
+	}
+}
+
+func TestLoad_OTel_InvalidExporter_IsRejected(t *testing.T) {
+	for _, exporter := range []string{"jaeger", "zipkin", "datadog", "STDOUT"} {
+		exporter := exporter
+		t.Run("exporter="+exporter, func(t *testing.T) {
+			clearVergeEnv(t)
+			e := baseEnv()
+			e["VERGE_OTEL_ENABLED"] = "true"
+			e["VERGE_OTEL_EXPORTER"] = exporter
+			setEnv(t, e)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("exporter=%q should be invalid, expected an error", exporter)
+			}
+		})
+	}
+}
+
+func TestLoad_OTel_SampleRate_ValidBoundaries(t *testing.T) {
+	for _, rate := range []string{"0", "0.0", "0.1", "0.5", "1", "1.0"} {
+		rate := rate
+		t.Run("rate="+rate, func(t *testing.T) {
+			clearVergeEnv(t)
+			e := baseEnv()
+			e["VERGE_OTEL_ENABLED"] = "true"
+			e["VERGE_OTEL_EXPORTER"] = "stdout"
+			e["VERGE_OTEL_SAMPLE_RATE"] = rate
+			setEnv(t, e)
+
+			_, err := Load()
+			if err != nil {
+				t.Fatalf("sample_rate=%s should be valid, got: %v", rate, err)
+			}
+		})
+	}
+}
+
+func TestLoad_OTel_SampleRate_OutOfRange_IsInvalid(t *testing.T) {
+	for _, rate := range []string{"-0.1", "1.1", "2.0", "-1"} {
+		rate := rate
+		t.Run("rate="+rate, func(t *testing.T) {
+			clearVergeEnv(t)
+			e := baseEnv()
+			e["VERGE_OTEL_ENABLED"] = "true"
+			e["VERGE_OTEL_EXPORTER"] = "stdout"
+			e["VERGE_OTEL_SAMPLE_RATE"] = rate
+			setEnv(t, e)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf(
+					"sample_rate=%s should be invalid (validate: min=0,max=1), got no error",
+					rate,
+				)
+			}
+		})
+	}
+}
+
+func TestLoad_OTel_LogLevel_Debug_IsValid(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_LOG_LEVEL"] = "debug"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("log_level=debug should be valid, got: %v", err)
+	}
+	if cfg.OTel.LogLevel != "debug" {
+		t.Errorf("OTel.LogLevel: want %q, got %q", "debug", cfg.OTel.LogLevel)
+	}
+}
+
+func TestLoad_OTel_LogLevel_Invalid_IsRejected(t *testing.T) {
+	for _, level := range []string{"warn", "error", "trace", "INFO", "DEBUG"} {
+		level := level
+		t.Run("level="+level, func(t *testing.T) {
+			clearVergeEnv(t)
+			e := baseEnv()
+			e["VERGE_OTEL_LOG_LEVEL"] = level
+			setEnv(t, e)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("log_level=%q should be invalid (oneof=info debug), got no error", level)
+			}
+		})
+	}
+}
+
+func TestLoad_OTel_CustomServiceName(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_SERVICE_NAME"] = "verge-staging"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.OTel.ServiceName != "verge-staging" {
+		t.Errorf("OTel.ServiceName: want %q, got %q", "verge-staging", cfg.OTel.ServiceName)
+	}
+}
+
+func TestLoad_OTel_CustomMetricsInterval(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_METRICS_INTERVAL"] = "30s"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.OTel.MetricsInterval != 30*time.Second {
+		t.Errorf("OTel.MetricsInterval: want 30s, got %s", cfg.OTel.MetricsInterval)
+	}
+}
+
+func TestLoad_OTel_InvalidMetricsInterval(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_METRICS_INTERVAL"] = "not-a-duration"
+	setEnv(t, e)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid MetricsInterval duration string")
+	}
+}
+
+func TestLoad_OTel_OTLPEndpoint_StoredVerbatim(t *testing.T) {
+	clearVergeEnv(t)
+	e := baseEnv()
+	e["VERGE_OTEL_ENABLED"] = "true"
+	e["VERGE_OTEL_EXPORTER"] = "otlp"
+	e["VERGE_OTEL_OTLP_ENDPOINT"] = "otel-collector:4317"
+	setEnv(t, e)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.OTel.OTLPEndpoint != "otel-collector:4317" {
+		t.Errorf("OTel.OTLPEndpoint: want %q, got %q", "otel-collector:4317", cfg.OTel.OTLPEndpoint)
+	}
+}
+
 // full config round-trip
 
 func TestLoad_FullValidConfig(t *testing.T) {
@@ -880,6 +1148,13 @@ func TestLoad_FullValidConfig(t *testing.T) {
 
 		"VERGE_KAFKA_BROKERS": "kafka:9092",
 		"VERGE_KAFKA_TOPIC":   "verge.prod.events",
+
+		"VERGE_OTEL_ENABLED":          "true",
+		"VERGE_OTEL_EXPORTER":         "prometheus",
+		"VERGE_OTEL_SERVICE_NAME":     "verge-prod",
+		"VERGE_OTEL_SAMPLE_RATE":      "0.5",
+		"VERGE_OTEL_METRICS_INTERVAL": "30s",
+		"VERGE_OTEL_LOG_LEVEL":        "debug",
 	})
 
 	cfg, err := Load()
@@ -938,6 +1213,26 @@ func TestLoad_FullValidConfig(t *testing.T) {
 	}
 	if cfg.Kafka.Topic != "verge.prod.events" {
 		t.Errorf("Kafka.Topic: want %q, got %q", "verge.prod.events", cfg.Kafka.Topic)
+	}
+
+	// otel
+	if !cfg.OTel.Enabled {
+		t.Error("OTel.Enabled: want true, got false")
+	}
+	if cfg.OTel.Exporter != "prometheus" {
+		t.Errorf("OTel.Exporter: want %q, got %q", "prometheus", cfg.OTel.Exporter)
+	}
+	if cfg.OTel.ServiceName != "verge-prod" {
+		t.Errorf("OTel.ServiceName: want %q, got %q", "verge-prod", cfg.OTel.ServiceName)
+	}
+	if cfg.OTel.SampleRate != 0.5 {
+		t.Errorf("OTel.SampleRate: want 0.5, got %f", cfg.OTel.SampleRate)
+	}
+	if cfg.OTel.MetricsInterval != 30*time.Second {
+		t.Errorf("OTel.MetricsInterval: want 30s, got %s", cfg.OTel.MetricsInterval)
+	}
+	if cfg.OTel.LogLevel != "debug" {
+		t.Errorf("OTel.LogLevel: want %q, got %q", "debug", cfg.OTel.LogLevel)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	vergev1 "github.com/bhpcv252/verge/api/proto/verge/v1"
 	grpcv1 "github.com/bhpcv252/verge/internal/api/grpc/v1"
 	restv1 "github.com/bhpcv252/verge/internal/api/rest/v1"
+	"github.com/bhpcv252/verge/internal/observability"
 	"github.com/bhpcv252/verge/internal/outbox"
 	"github.com/bhpcv252/verge/internal/service"
 	"github.com/bhpcv252/verge/internal/storage/composite"
@@ -84,8 +85,16 @@ func startServerWithConfig(t *testing.T, cfg infraConfig) *testEnv {
 		redisBranchHeadStore = redisstore.NewBranchHeadStore(rdb, 5*time.Minute)
 		redisCommitCache := redisstore.NewCommitCache(rdb)
 
-		effectiveBranchStore = composite.NewBranchRouter(pgBranchStore, redisBranchHeadStore)
-		effectiveCommitStore = composite.NewCommitRouter(pgCommitStore, redisCommitCache)
+		effectiveBranchStore = composite.NewBranchRouter(
+			pgBranchStore,
+			redisBranchHeadStore,
+			observability.Noop(),
+		)
+		effectiveCommitStore = composite.NewCommitRouter(
+			pgCommitStore,
+			redisCommitCache,
+			observability.Noop(),
+		)
 	}
 
 	var neo4jDriver neo4j.DriverWithContext
@@ -93,7 +102,7 @@ func startServerWithConfig(t *testing.T, cfg infraConfig) *testEnv {
 	if cfg.neo4j {
 		neo4jDriver = testhelper.SetupNeo4j(t)
 		n4jStore := neo4jstore.NewGraphStore(neo4jDriver)
-		_ = composite.NewGraphRouter(n4jStore, pgstore.NewGraphStore(pool))
+		_ = composite.NewGraphRouter(n4jStore, pgstore.NewGraphStore(pool), observability.Noop())
 	}
 
 	repoSvc := service.NewRepoService(pgRepoStore)
@@ -137,7 +146,13 @@ func startServerWithConfig(t *testing.T, cfg infraConfig) *testEnv {
 	commitHandler := restv1.NewCommitHandler(commitSvc)
 	mergeHandler := restv1.NewMergeHandler(mergeSvc)
 
-	router := restv1.NewRouter(repoHandler, branchHandler, commitHandler, mergeHandler)
+	router := restv1.NewRouter(
+		observability.Noop(),
+		repoHandler,
+		branchHandler,
+		commitHandler,
+		mergeHandler,
+	)
 
 	restLn, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err, "get free port for REST server")

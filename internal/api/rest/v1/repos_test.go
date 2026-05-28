@@ -14,6 +14,7 @@ import (
 
 	"github.com/bhpcv252/verge/internal/api/core"
 	"github.com/bhpcv252/verge/internal/domain"
+	"github.com/bhpcv252/verge/internal/observability"
 	"github.com/bhpcv252/verge/internal/service"
 	"github.com/bhpcv252/verge/testhelper"
 )
@@ -48,6 +49,7 @@ func (m *mockRepoService) ListRepos(
 
 func newTestRouter(svc core.RepoService) http.Handler {
 	return NewRouter(
+		observability.Noop(),
 		NewRepoHandler(svc),
 		nil, // branchHandler
 		nil, // commitHandler

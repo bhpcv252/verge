@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+
+	"github.com/bhpcv252/verge/internal/observability"
 )
 
 type DebeziumSource struct {
@@ -40,10 +42,12 @@ func NewDebeziumSource(cfg DebeziumConfig) *DebeziumSource {
 }
 
 func (s *DebeziumSource) Start(ctx context.Context) error {
-	log.Printf("debezium source: connected to topic=%s group=%s brokers=%v",
-		s.reader.Config().Topic,
-		s.reader.Config().GroupID,
-		s.reader.Config().Brokers)
+	cfg := s.reader.Config()
+	observability.L(ctx).Info("debezium source connected",
+		slog.String("topic", cfg.Topic),
+		slog.String("group", cfg.GroupID),
+		slog.Any("brokers", cfg.Brokers),
+	)
 	return nil
 }
 
@@ -51,7 +55,7 @@ func (s *DebeziumSource) Next(ctx context.Context) ([]OutboxEvent, error) {
 	var events []OutboxEvent
 	s.pendingCommits = s.pendingCommits[:0] // clear previous batch
 
-	// fetch first message
+	// fetch first message — blocks until one arrives
 	firstMsg, err := s.reader.FetchMessage(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -63,29 +67,31 @@ func (s *DebeziumSource) Next(ctx context.Context) ([]OutboxEvent, error) {
 	// parse first message
 	event, err := s.parseDebeziumMessage(firstMsg)
 	if err != nil {
-		log.Printf("debezium source: parse error (offset=%d partition=%d): %v",
-			firstMsg.Offset, firstMsg.Partition, err)
-		// commit bad message to skip it and prevent infinite loop
+		observability.L(ctx).Warn("debezium source: skipping unparsable message",
+			slog.Int64("offset", firstMsg.Offset),
+			slog.Int("partition", firstMsg.Partition),
+			slog.String("error", err.Error()),
+		)
+		// commit the bad message so it is not re-delivered and we don't loop
 		if commitErr := s.reader.CommitMessages(ctx, firstMsg); commitErr != nil {
 			return nil, fmt.Errorf("commit bad message: %w", commitErr)
 		}
-		// recurse to get next message
+		// recurse to get the next valid message
 		return s.Next(ctx)
 	}
 
 	events = append(events, event)
 	s.pendingCommits = append(s.pendingCommits, firstMsg)
 
-	// try to fetch more messages without blocking (up to batch size)
+	// try to fill the batch without blocking (10 ms window per attempt)
 	for len(events) < s.batch {
-		// create a short timeout context for non-blocking fetch
 		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 		msg, err := s.reader.FetchMessage(fetchCtx)
 		cancel()
 
 		if err != nil {
 			if fetchCtx.Err() != nil || err == context.DeadlineExceeded {
-				break
+				break // no more messages ready right now — return what we have
 			}
 			if ctx.Err() != nil {
 				break
@@ -93,14 +99,20 @@ func (s *DebeziumSource) Next(ctx context.Context) ([]OutboxEvent, error) {
 			return nil, fmt.Errorf("fetch message: %w", err)
 		}
 
-		// parse message
 		event, err := s.parseDebeziumMessage(msg)
 		if err != nil {
-			log.Printf("debezium source: parse error (offset=%d partition=%d): %v",
-				msg.Offset, msg.Partition, err)
-			// commit bad message to skip it
+			observability.L(ctx).Warn("debezium source: skipping unparsable message",
+				slog.Int64("offset", msg.Offset),
+				slog.Int("partition", msg.Partition),
+				slog.String("error", err.Error()),
+			)
+			// commit bad message so it does not block the partition
 			if commitErr := s.reader.CommitMessages(ctx, msg); commitErr != nil {
-				log.Printf("debezium source: failed to commit bad message: %v", commitErr)
+				observability.L(ctx).Error("debezium source: failed to commit bad message",
+					slog.Int64("offset", msg.Offset),
+					slog.Int("partition", msg.Partition),
+					slog.String("error", commitErr.Error()),
+				)
 			}
 			continue
 		}
