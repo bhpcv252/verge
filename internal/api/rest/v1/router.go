@@ -37,7 +37,7 @@ func NewRouter(
 
 	// versioned API
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(auth.HTTPMiddleware(validator))
+		r.Use(auth.HTTPMiddleware(validator, obs))
 
 		repoHandler.Mount(r)
 		branchHandler.Mount(r)

@@ -8,6 +8,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	"github.com/bhpcv252/verge/internal/observability"
 )
 
 func noopHandler(ctx context.Context, req any) (any, error) {
@@ -23,8 +25,7 @@ func ctxWithMD(key, value string) context.Context {
 }
 
 func TestUnaryInterceptor_Disabled(t *testing.T) {
-	// nil validator
-	interceptor := UnaryInterceptor(nil)
+	interceptor := UnaryInterceptor(nil, observability.Noop())
 
 	for _, md := range []metadata.MD{
 		nil,
@@ -47,7 +48,7 @@ func TestUnaryInterceptor_Enabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	interceptor := UnaryInterceptor(v)
+	interceptor := UnaryInterceptor(v, observability.Noop())
 
 	cases := []struct {
 		name     string
@@ -121,7 +122,7 @@ func TestUnaryInterceptor_HandlerNotCalledOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	interceptor := UnaryInterceptor(v)
+	interceptor := UnaryInterceptor(v, observability.Noop())
 
 	called := false
 	tracingHandler := func(ctx context.Context, req any) (any, error) {
@@ -144,9 +145,10 @@ func TestUnaryInterceptor_HandlerNotCalledOnFailure(t *testing.T) {
 }
 
 func TestStreamInterceptor_Disabled(t *testing.T) {
-	interceptor := StreamInterceptor(nil)
+	interceptor := StreamInterceptor(nil, observability.Noop())
 	ss := &fakeStream{ctx: context.Background()}
-	err := interceptor(nil, ss, nil, func(srv any, stream grpc.ServerStream) error {
+	streamInfo := &grpc.StreamServerInfo{FullMethod: "/verge.v1.RepoService/StreamTest"}
+	err := interceptor(nil, ss, streamInfo, func(srv any, stream grpc.ServerStream) error {
 		return nil
 	})
 	if err != nil {
@@ -159,11 +161,12 @@ func TestStreamInterceptor_Enabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	interceptor := StreamInterceptor(v)
+	interceptor := StreamInterceptor(v, observability.Noop())
 
 	t.Run("valid key", func(t *testing.T) {
 		ss := &fakeStream{ctx: ctxWithMD("authorization", "Bearer key-good")}
-		err := interceptor(nil, ss, nil, func(_ any, _ grpc.ServerStream) error { return nil })
+		si := &grpc.StreamServerInfo{FullMethod: "/verge.v1.RepoService/StreamTest"}
+		err := interceptor(nil, ss, si, func(_ any, _ grpc.ServerStream) error { return nil })
 		if err != nil {
 			t.Errorf("expected no error, got %v", err)
 		}
@@ -171,7 +174,8 @@ func TestStreamInterceptor_Enabled(t *testing.T) {
 
 	t.Run("wrong key", func(t *testing.T) {
 		ss := &fakeStream{ctx: ctxWithMD("authorization", "Bearer key-bad")}
-		err := interceptor(nil, ss, nil, func(_ any, _ grpc.ServerStream) error { return nil })
+		si := &grpc.StreamServerInfo{FullMethod: "/verge.v1.RepoService/StreamTest"}
+		err := interceptor(nil, ss, si, func(_ any, _ grpc.ServerStream) error { return nil })
 		if err == nil {
 			t.Fatal("expected error")
 		}

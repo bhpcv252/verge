@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/bhpcv252/verge/internal/observability"
 )
 
 var okHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -12,8 +14,7 @@ var okHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 })
 
 func TestHTTPMiddleware_Disabled(t *testing.T) {
-	// nil validator
-	mw := HTTPMiddleware(nil)(okHandler)
+	mw := HTTPMiddleware(nil, observability.Noop())(okHandler)
 
 	for _, authHeader := range []string{"", "Bearer wrong", "Bearer anything"} {
 		t.Run("header="+authHeader, func(t *testing.T) {
@@ -35,7 +36,7 @@ func TestHTTPMiddleware_Enabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	mw := HTTPMiddleware(v)(okHandler)
+	mw := HTTPMiddleware(v, observability.Noop())(okHandler)
 
 	cases := []struct {
 		name       string
@@ -123,7 +124,7 @@ func TestHTTPMiddleware_HandlerNotCalledOnFailure(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mw := HTTPMiddleware(v)(inner)
+	mw := HTTPMiddleware(v, observability.Noop())(inner)
 	req := httptest.NewRequest(http.MethodGet, "/v1/repos", nil)
 	req.Header.Set("Authorization", "Bearer bad-key")
 	rec := httptest.NewRecorder()

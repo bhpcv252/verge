@@ -27,6 +27,9 @@ type Metrics struct {
 	OutboxPollDuration         metric.Float64Histogram
 	OutboxLagEvents            metric.Int64Gauge
 	OutboxBatchSize            metric.Float64Histogram
+
+	// auth
+	AuthFailuresTotal metric.Int64Counter
 }
 
 func newMetrics(meter metric.Meter) (*Metrics, error) {
@@ -166,6 +169,20 @@ func newMetrics(meter metric.Meter) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("observability: verge_outbox_batch_size: %w", err)
+	}
+
+	// auth
+
+	m.AuthFailuresTotal, err = meter.Int64Counter(
+		"verge_auth_failures_total",
+		metric.WithDescription(
+			"Total number of requests rejected due to a missing or invalid API key. "+
+				"Label transport=http|grpc. No reason label is exposed to avoid "+
+				"leaking oracle information about key validity.",
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("observability: verge_auth_failures_total: %w", err)
 	}
 
 	return &m, nil

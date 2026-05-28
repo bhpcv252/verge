@@ -23,12 +23,12 @@ func NewServer(
 ) *grpc.Server {
 	unaryInterceptors := []grpc.UnaryServerInterceptor{
 		recoveryInterceptor,
-		auth.UnaryInterceptor(validator), // no-op when validator is nil
+		auth.UnaryInterceptor(validator, obs),
 		observability.GRPCUnaryInterceptor(obs),
 	}
 
 	streamInterceptors := []grpc.StreamServerInterceptor{
-		auth.StreamInterceptor(validator), // no-op when validator is nil
+		auth.StreamInterceptor(validator, obs),
 	}
 
 	s := grpc.NewServer(
