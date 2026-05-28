@@ -35,6 +35,10 @@ func NewRouter(
 		r.Get("/metrics", obs.PrometheusHandler.ServeHTTP)
 	}
 
+	// API docs
+	r.Get("/docs", docsUIHandler)
+	r.Get("/docs/openapi.yaml", docsSpecHandler)
+
 	// versioned API
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(auth.HTTPMiddleware(validator, obs))

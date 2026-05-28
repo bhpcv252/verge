@@ -1,0 +1,834 @@
+openapi: "3.0.3"
+
+info:
+  title: Verge API
+  version: "1.0.0"
+  description: |
+    Verge is a version-control layer for structured data products. It tracks changes
+    via a commit DAG, supports named branches with optimistic-lock advancement, and
+    emits change events via an outbox for downstream consumers.
+
+    ## Authentication
+    Authentication is optional and controlled by `VERGE_AUTH_ENABLED`. When enabled,
+    every request to `/v1/*` must include a valid `X-API-Key` header.
+
+    ## Pagination
+    All list endpoints use cursor-based pagination. Pass the `next_cursor` value from
+    one response as the `cursor` parameter of the next request. An empty `next_cursor`
+    means you have reached the last page.
+
+    ## Optimistic Locking
+    `PATCH /repos/{repoId}/branches/{name}` and `POST /repos/{repoId}/merges` use
+    optimistic locking. You must supply the branch's current head commit ID as
+    `expected_commit_id` / `expected_target_head`. If the head has moved since you
+    last read it, you receive a `409 branch_conflict` or `409 stale_merge_target`
+    error containing the real current head in `current_head`.
+
+servers:
+  - url: http://localhost:8080/v1
+    description: Local development (HTTP)
+
+security:
+  - apiKey: []
+  - {} # allow unauthenticated when VERGE_AUTH_ENABLED=false
+
+tags:
+  - name: Repositories
+    description: Top-level containers. One product resource maps to one repository.
+  - name: Branches
+    description: Mutable named pointers to commits. Support optimistic-lock advancement.
+  - name: Commits
+    description: Immutable snapshots. Each commit carries a DataPointer to the actual data.
+  - name: Merges
+    description: Creates a two-parent merge commit and atomically advances the target branch.
+
+# Reusable components
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Required only when `VERGE_AUTH_ENABLED=true`.
+
+  schemas:
+    Repository:
+      type: object
+      description: A top-level container that holds branches and commits.
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+          readOnly: true
+        name:
+          type: string
+          example: "my-dataset"
+        default_branch:
+          type: string
+          example: "main"
+        created_at:
+          type: string
+          format: date-time
+          example: "2024-01-15T10:30:00Z"
+          readOnly: true
+
+    Branch:
+      type: object
+      description: A mutable named pointer to a commit within a repository.
+      properties:
+        name:
+          type: string
+          example: "main"
+        repo_id:
+          type: string
+          format: uuid
+          readOnly: true
+        commit_id:
+          type: string
+          format: uuid
+          description: The commit this branch currently points to (the branch head).
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    DataPointer:
+      type: object
+      description: |
+        A reference to the actual data stored outside Verge (S3, a URL, a database row, etc.).
+        Verge stores the pointer, not the data itself.
+      required:
+        - type
+        - location
+      properties:
+        type:
+          type: string
+          enum: [s3, url, db, custom]
+          example: "s3"
+        location:
+          type: string
+          example: "s3://my-bucket/datasets/q3-2024.parquet"
+        hash:
+          type: string
+          description: Optional content hash. Must start with `sha256:` if provided.
+          example: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Optional arbitrary JSON metadata attached to the pointer.
+          example:
+            rows: 1500000
+            schema_version: 3
+
+    Commit:
+      type: object
+      description: |
+        An immutable snapshot. Commits form a DAG, a root commit has no parents,
+        a regular commit has one parent, and a merge commit has exactly two parents.
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        repo_id:
+          type: string
+          format: uuid
+          readOnly: true
+        parent_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: "Empty → root commit. One ID → regular commit. Two IDs → merge commit."
+        data_pointer:
+          $ref: "#/components/schemas/DataPointer"
+        message:
+          type: string
+          example: "Add Q3 2024 dataset"
+        author:
+          type: string
+          example: "alice"
+        timestamp:
+          type: string
+          format: date-time
+          readOnly: true
+
+    Error:
+      type: object
+      description: Standard error envelope returned on all 4xx/5xx responses.
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code.
+          enum:
+            - invalid_request
+            - repo_not_found
+            - branch_not_found
+            - commit_not_found
+            - branch_already_exists
+            - branch_conflict
+            - stale_merge_target
+            - cannot_delete_default_branch
+            - invalid_parent
+            - internal_error
+          example: "branch_conflict"
+        message:
+          type: string
+          description: Human-readable description of the error.
+          example: 'Branch "main" has advanced. Current head is "abc...". Fetch the latest head and retry.'
+        current_head:
+          type: string
+          nullable: true
+          description: |
+            Present only for `branch_conflict` and `stale_merge_target` errors.
+            Contains the actual current head commit ID so the caller can retry
+            without an extra GET.
+          example: "c1d2e3f4-a5b6-7890-cdef-012345678901"
+
+  responses:
+    BadRequest:
+      description: The request is missing a required field or contains an invalid value.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "invalid_request"
+            message: "'name' is required and must not be empty."
+
+    NotFound:
+      description: The requested resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "repo_not_found"
+            message: "The requested repository does not exist."
+
+    Conflict:
+      description: A conflict prevented the operation from completing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    InternalError:
+      description: An unexpected server-side error occurred.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "internal_error"
+            message: "An unexpected error occurred."
+
+  parameters:
+    repoId:
+      name: repoId
+      in: path
+      required: true
+      description: The unique ID of the repository.
+      schema:
+        type: string
+        format: uuid
+
+    branchName:
+      name: name
+      in: path
+      required: true
+      description: The name of the branch.
+      schema:
+        type: string
+        example: "main"
+
+    commitId:
+      name: commitId
+      in: path
+      required: true
+      description: The unique ID of the commit.
+      schema:
+        type: string
+        format: uuid
+
+    limit:
+      name: limit
+      in: query
+      description: Maximum number of results to return. Defaults to 20.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+    cursor:
+      name: cursor
+      in: query
+      description: Pagination cursor returned by the previous response as `next_cursor`.
+      schema:
+        type: string
+
+# Paths
+
+paths:
+  # Repositories
+
+  /repos:
+    post:
+      operationId: createRepo
+      summary: Create a repository
+      tags: [Repositories]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, default_branch]
+              properties:
+                name:
+                  type: string
+                  example: "my-dataset"
+                default_branch:
+                  type: string
+                  example: "main"
+            example:
+              name: "my-dataset"
+              default_branch: "main"
+      responses:
+        "201":
+          description: Repository created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Repository"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      operationId: listRepos
+      summary: List repositories
+      tags: [Repositories]
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: Paginated list of repositories.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  repos:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Repository"
+                  next_cursor:
+                    type: string
+                    description: Pass this as `cursor` to fetch the next page. Empty when no more pages.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /repos/{repoId}:
+    get:
+      operationId: getRepo
+      summary: Get a repository
+      tags: [Repositories]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+      responses:
+        "200":
+          description: Repository found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Repository"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # Branches
+
+  /repos/{repoId}/branches:
+    post:
+      operationId: createBranch
+      summary: Create a branch
+      tags: [Branches]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, source_commit_id]
+              properties:
+                name:
+                  type: string
+                  example: "feature/my-experiment"
+                source_commit_id:
+                  type: string
+                  format: uuid
+                  description: The commit the new branch will initially point to.
+            example:
+              name: "feature/my-experiment"
+              source_commit_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      responses:
+        "201":
+          description: Branch created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Branch"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: Repository or source commit not found.
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A branch with this name already exists.
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      operationId: listBranches
+      summary: List branches in a repository
+      tags: [Branches]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: Paginated list of branches.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  branches:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Branch"
+                  next_cursor:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /repos/{repoId}/branches/{name}:
+    get:
+      operationId: getBranch
+      summary: Get a branch
+      tags: [Branches]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+        - $ref: "#/components/parameters/branchName"
+      responses:
+        "200":
+          description: Branch found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Branch"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      operationId: advanceBranch
+      summary: Advance a branch to a new commit
+      description: |
+        Atomically moves the branch pointer to `commit_id`, provided the branch's
+        current head matches `expected_commit_id` (optimistic lock).
+
+        If the branch head has moved since you last read it, the request fails with
+        `409 branch_conflict`. The response body includes `current_head` so you can
+        fetch only the delta and retry without an extra GET.
+      tags: [Branches]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+        - $ref: "#/components/parameters/branchName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [commit_id, expected_commit_id]
+              properties:
+                commit_id:
+                  type: string
+                  format: uuid
+                  description: The new commit to point this branch at.
+                expected_commit_id:
+                  type: string
+                  format: uuid
+                  description: The commit this branch must currently point to (optimistic lock guard).
+            example:
+              commit_id: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+              expected_commit_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      responses:
+        "200":
+          description: Branch advanced successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Branch"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The branch head has moved since you read it. The `current_head` field
+            in the response contains the actual current commit ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "branch_conflict"
+                message: 'Branch "main" has advanced. Fetch the latest head and retry.'
+                current_head: "c1d2e3f4-a5b6-7890-cdef-012345678901"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteBranch
+      summary: Delete a branch
+      description: |
+        Deletes a branch from the repository. The default branch of a repository cannot
+        be deleted, change the default branch first.
+      tags: [Branches]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+        - $ref: "#/components/parameters/branchName"
+      responses:
+        "204":
+          description: Branch deleted successfully.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cannot delete the repository's default branch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "cannot_delete_default_branch"
+                message: "Cannot delete the default branch. Set a different default branch first."
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # Commits
+
+  /repos/{repoId}/commits:
+    post:
+      operationId: createCommit
+      summary: Create a commit
+      description: |
+        Creates a new commit. A commit carries a `data_pointer`, a reference to
+        where the actual data lives, rather than storing the data itself.
+
+        **Parent rules:**
+        - No `parent_ids` → root commit (the first commit in a fresh repository)
+        - One `parent_id` → regular commit
+        - Two parents → use `POST /repos/{repoId}/merges` instead
+
+        **Idempotency:** supply a client-generated UUID as `idempotency_key` to make
+        retries safe. If a commit with the same key already exists in the repo, it is
+        returned with `existing: true` and no duplicate is created.
+      tags: [Commits]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, author, data_pointer]
+              properties:
+                parent_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  maxItems: 1
+                  description: Empty for a root commit; exactly one ID for a regular commit.
+                data_pointer:
+                  $ref: "#/components/schemas/DataPointer"
+                message:
+                  type: string
+                  example: "Add Q3 2024 dataset"
+                author:
+                  type: string
+                  example: "alice"
+                idempotency_key:
+                  type: string
+                  format: uuid
+                  description: Optional. Client-generated UUID for safe retries.
+            example:
+              parent_ids: ["a1b2c3d4-e5f6-7890-abcd-ef1234567890"]
+              data_pointer:
+                type: "s3"
+                location: "s3://my-bucket/datasets/q3-2024.parquet"
+                hash: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              message: "Add Q3 2024 dataset"
+              author: "alice"
+              idempotency_key: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        "201":
+          description: Commit created successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  commit:
+                    $ref: "#/components/schemas/Commit"
+                  existing:
+                    type: boolean
+                    description: "`true` if the commit was deduplicated via `idempotency_key`."
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: One or more `parent_ids` do not exist in this repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "invalid_parent"
+                message: "One or more parent_ids do not exist in this repository."
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      operationId: listCommits
+      summary: List commits in a repository
+      description: |
+        Returns commits in the repository, optionally filtered and traversed.
+        Use `traversal=dag` to walk the commit graph; use `traversal=flat`
+        (the default) for a simple chronological listing.
+      tags: [Commits]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+        - name: branch
+          in: query
+          description: Filter commits reachable from this branch.
+          schema:
+            type: string
+            example: "main"
+        - name: author
+          in: query
+          description: Filter commits by author.
+          schema:
+            type: string
+            example: "alice"
+        - name: since
+          in: query
+          description: Return commits at or after this timestamp (ISO 8601).
+          schema:
+            type: string
+            format: date-time
+            example: "2024-01-01T00:00:00Z"
+        - name: until
+          in: query
+          description: Return commits at or before this timestamp (ISO 8601).
+          schema:
+            type: string
+            format: date-time
+            example: "2024-12-31T23:59:59Z"
+        - name: traversal
+          in: query
+          description: |
+            Graph traversal mode.
+            - `flat` (default) - chronological order
+            - `dag` - DAG walk from the branch head
+          schema:
+            type: string
+            enum: [flat, dag]
+            default: flat
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: Paginated list of commits.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  commits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Commit"
+                  next_cursor:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /repos/{repoId}/commits/{commitId}:
+    get:
+      operationId: getCommit
+      summary: Get a commit
+      tags: [Commits]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+        - $ref: "#/components/parameters/commitId"
+      responses:
+        "200":
+          description: Commit found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Commit"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /repos/{repoId}/commits/{commitId}/parents:
+    get:
+      operationId: getParents
+      summary: Get the parents of a commit
+      description: |
+        Returns the direct parents of a commit. Root commits return an empty `parents`
+        array. Regular commits return one parent. Merge commits return two parents.
+      tags: [Commits]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+        - $ref: "#/components/parameters/commitId"
+      responses:
+        "200":
+          description: Parent commits.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  commit_id:
+                    type: string
+                    format: uuid
+                  parents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Commit"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # Merges
+
+  /repos/{repoId}/merges:
+    post:
+      operationId: createMerge
+      summary: Create a merge commit
+      description: |
+        Creates a two-parent merge commit and atomically advances `target_branch`
+        to the new commit, provided the branch currently points to `expected_target_head`
+        (optimistic lock).
+
+        If `target_branch` has moved since you last read it, the request fails with
+        `409 stale_merge_target`. The response body includes `current_head` so you
+        can re-read only the delta and retry.
+      tags: [Merges]
+      parameters:
+        - $ref: "#/components/parameters/repoId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - parent_ids
+                - expected_target_head
+                - target_branch
+                - data_pointer
+                - message
+                - author
+              properties:
+                parent_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  minItems: 2
+                  maxItems: 2
+                  description: Exactly two parent commit IDs, the merge sources.
+                expected_target_head:
+                  type: string
+                  format: uuid
+                  description: The current head of `target_branch` (optimistic lock guard).
+                target_branch:
+                  type: string
+                  description: The branch to advance after the merge commit is created.
+                  example: "main"
+                data_pointer:
+                  $ref: "#/components/schemas/DataPointer"
+                message:
+                  type: string
+                  example: "Merge feature/my-experiment into main"
+                author:
+                  type: string
+                  example: "alice"
+            example:
+              parent_ids:
+                - "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                - "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+              expected_target_head: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              target_branch: "main"
+              data_pointer:
+                type: "s3"
+                location: "s3://my-bucket/datasets/merged-q3-q4.parquet"
+              message: "Merge feature/my-experiment into main"
+              author: "alice"
+      responses:
+        "201":
+          description: Merge commit created and target branch advanced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Commit"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            The target branch has moved since you read it (`stale_merge_target`).
+            The `current_head` field contains the actual current head.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "stale_merge_target"
+                message: 'Branch "main" has moved during the merge. Fetch the latest heads and retry.'
+                current_head: "c1d2e3f4-a5b6-7890-cdef-012345678901"
+        "500":
+          $ref: "#/components/responses/InternalError"
