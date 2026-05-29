@@ -112,6 +112,20 @@ The server and worker are separate binaries. The worker is responsible for propa
 derived stores (Redis, Neo4j). For PostgreSQL-only development you can skip the worker; the API still
 functions correctly without it.
 
+**Environment variables**
+
+All configuration is via environment variables with the `VERGE_` prefix. Copy `.env.example` to `.env` and
+adjust. Key groups:
+
+- `VERGE_SERVER_*`: HTTP and gRPC listen ports and enable/disable toggles.
+- `VERGE_STORAGE_*`: PostgreSQL URL (always required); Redis and Neo4j URLs and enable flags.
+- `VERGE_AUTH_ENABLED` / `VERGE_AUTH_KEYS`: optional API key auth. Set `VERGE_AUTH_ENABLED=true` and provide
+  at least one key in `VERGE_AUTH_KEYS` (comma-separated). All `/v1` requests then require
+  `Authorization: Bearer <key>`.
+- `VERGE_OTEL_ENABLED` / `VERGE_OTEL_EXPORTER`: observability toggle and exporter backend (`stdout`,
+  `otlp`, `prometheus`). Disabled by default; when off, all telemetry is a no-op.
+- `VERGE_OUTBOX_*`: outbox worker source type, polling interval, Debezium/Kafka settings.
+
 ---
 
 ## Testing
@@ -181,6 +195,8 @@ make test-all
 - Handle errors explicitly
 - Any new API behavior needs a structured error response with a machine-readable `error` code and a human-readable `message`
 - New storage backend operations go through the composite router layer, not directly to services
+- Auth middleware lives in `internal/auth`. HTTP and gRPC variants are separate files (`http.go`, `grpc.go`). Both receive a `*auth.Validator` that is `nil` when auth is disabled, which makes them pass-through with zero overhead.
+- Observability lives in `internal/observability`. The `Provider` carries a `Tracer`, `Meter`, `Logger`, and pre-registered `Metrics`. Pass `*observability.Provider` into components that need telemetry; do not use global OTel calls directly. For request-scoped logging, propagate the logger through context using `observability.WithLogger` / `observability.L(ctx)`.
 
 ---
 

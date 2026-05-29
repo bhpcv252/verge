@@ -2,6 +2,8 @@
 
 This document walks through three integration scenarios from the **product's point of view**: what they need to build, what they hand off to Verge, and what they get back. Each product has different data formats, different merge complexity, and different scale characteristics. Verge's role is identical in all three cases: track the graph, store the pointer, stay out of the data.
 
+> **Authentication:** If your Verge deployment has `VERGE_AUTH_ENABLED=true`, every API call from your backend must include the header `Authorization: Bearer <key>` (REST) or the gRPC metadata key `authorization: Bearer <key>`. The examples below omit this header for brevity; add it to every request in authenticated deployments.
+
 ---
 
 ## Table of Contents
