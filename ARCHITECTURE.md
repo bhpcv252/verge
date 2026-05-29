@@ -6,8 +6,6 @@
 
 ## Table of Contents
 
-- [Functional Requirements](#functional-requirements)
-- [Non-Functional Requirements](#non-functional-requirements)
 - [Core Entities](#core-entities)
 - [APIs](#apis)
   - [REST API](#rest-api)
@@ -30,7 +28,11 @@
       - [`POST /v1/repos/:repo_id/merges`](#post-v1reposrepo_idmerges)
     - [Health](#health)
       - [`GET /health`](#get-health)
+    - [OpenAPI Documentation](#openapi-documentation)
+      - [`GET /docs`](#get-docs)
+      - [`GET /docs/openapi.yaml`](#get-docsopenapiyaml)
   - [gRPC API](#grpc-api)
+- [Authentication](#authentication)
 - [Outbox Worker](#outbox-worker)
   - [Event Sources](#event-sources)
   - [Worker Modes](#worker-modes)
@@ -40,146 +42,16 @@
   - [BranchRouter](#branchrouter)
   - [CommitRouter](#commitrouter)
   - [GraphRouter](#graphrouter)
+- [Observability](#observability)
+  - [Configuration](#configuration)
+  - [Exporters](#exporters)
+  - [Distributed Tracing](#distributed-tracing)
+  - [Structured Logging](#structured-logging)
+  - [Metrics Reference](#metrics-reference)
 - [Error Code Reference](#error-code-reference)
   - [Error Mapping - REST to gRPC](#error-mapping---rest-to-grpc)
 
 ---
-
-## Functional Requirements
-
-- Allow products to create a named repository
-  as a logical container for a commit graph
-
-- Allow products to create immutable commits against
-  a repository, each carrying a parent reference list, a
-  DataPointer, a message, and an author
-
-- Support root commits with zero parents (first commit in a repo)
-
-- Support merge commits with exactly two parents
-
-- Store the DataPointer as an opaque JSON blob,
-  never reading, interpreting, or validating its contents beyond structure
-
-- Allow products to create branches from any existing commit in a repository
-
-- Allow products to advance a branch pointer to a new commit
-
-- Allow products to delete a branch
-
-- Allow products to merge any branch into any other branch by accepting a
-  two-parent commit and a target branch name
-
-- Advance the target branch pointer atomically when a merge commit is created
-
-- Allow products to fetch the current head commit of any branch
-
-- Allow products to fetch a full commit record by commit ID,
-  including its DataPointer
-
-- Allow products to list all branches in a repository
-
-- Allow products to traverse commit history from any branch head,
-  returning commits in reverse chronological order
-
-- Support cursor-based pagination on all history and list queries
-
-- Support filtering history queries by author, timestamp range, and branch
-
-- Allow products to fetch the parent commits of any given
-  commit for DAG traversal
-
-- Validate that all parent IDs in a commit request exist
-  within the same repository before inserting
-
-- Reject a branch advancement if the branch head has moved
-  since the product last read it (optimistic concurrency)
-
-- Write a commit row, commit_parents rows, branch pointer
-  update, and outbox event all within a single atomic transaction
-
-- Propagate commit and branch changes to derived stores
-  (Neo4j, Redis) asynchronously via the outbox
-
-- Expose all operations over HTTP/REST and gRPC; and publish .proto
-  files for all gRPC operations
-
-- Support pluggable storage backends: PostgreSQL (required), Neo4j, Redis;
-  selectable per storage interface via configuration
-
-- PostgreSQL is always required as the source of truth
-
-- Support Neo4j as an optional GraphStore for complex ancestry
-  and merge-base queries when enabled by the operator
-
-- Support Redis as an optional cache layer for sub-millisecond branch head
-  reads and commit object lookups when enabled by the operator
-
-- Support outbox replay; workers must be idempotent and
-  replayable from any point without corrupting derived store state
-
-- Must never expose Verge APIs directly to end users or
-  frontend clients, all calls must originate from the product's backend
-
-## Non-Functional Requirements
-
-- System must never store, read, inspect,
-  or interpret the actual data a product is versioning,
-  only the pointer to it
-
-- The commit log must be append-only, no commit
-  may ever be updated or deleted once written
-
-- Branch pointer advancement must use optimistic locking,
-  no blind overwrites
-
-- The outbox event must be written in the same PostgreSQL transaction
-  as the commit, a commit that exists without a corresponding outbox
-  event is a consistency violation
-
-- PostgreSQL must always be the source of truth; derived stores (Neo4j, Redis)
-  are optional projections and must be rebuildable from PostgreSQL at any time
-
-- The system must be horizontally scalable at the API layer,
-  the API service must be stateless
-
-- History traversal queries must support pagination,
-  unbounded result sets are not permitted
-
-- The system must be deployable as a self-hosted microservice
-
-- System must support service-to-service authentication only,
-  API key or mTLS between the product backend and Verge
-
-- Branch head reads must be the fastest operation in the system;
-  when Redis is enabled, cache hit latency target is sub-millisecond
-
-- All write operations must return a structured error response with
-  a machine-readable error code and a human-readable message
-
-- The system must handle concurrent branch advancement gracefully,
-  returning a 409 with enough information for the caller to retry without data loss
-
-- The system must be operationally runnable at small scale
-  with only PostgreSQL, without requiring Redis or Neo4j
-
-- All database writes must use explicit transactions,
-  no implicit auto-commit on multi-step operations
-
-- The outbox workers must be idempotent,
-  replaying the same event twice must not corrupt derived store state
-
-- The system must produce structured logs and expose metrics hooks
-  for observability at all tiers
-
-- The API surface must be identical regardless of which storage
-  backends are active, backend selection must be invisible to the integrating product
-
-- The .proto definitions must be the authoritative contract for the gRPC interface,
-  the HTTP interface must be consistent with them
-
-- SDK releases must not be required for basic integration,
-  the raw HTTP and gRPC interfaces must be sufficient to fully integrate without any SDK
 
 ## Core Entities
 
@@ -816,14 +688,33 @@ still at this commit before proceeding. If the branch has moved, the request is 
 
 ##### `GET /health`
 
-Liveness check. Returns `200 OK` with an empty body. Not versioned, available at the root, not under `/v1`.
+Liveness check. Returns `200 OK` with an empty body. Available at the root.
+
+---
+
+#### OpenAPI Documentation
+
+---
+
+##### `GET /docs`
+
+Serves an interactive Swagger UI HTML page backed by the embedded OpenAPI spec. Load in a browser for a
+full clickable API reference. Available at the root.
+
+---
+
+##### `GET /docs/openapi.yaml`
+
+Serves the raw OpenAPI 3.0 YAML specification, embedded at build time from `api/openapi/openapi.yaml`.
+Cached for 5 minutes (`Cache-Control: public, max-age=300`). Use this URL to generate client SDKs or
+point external tooling at the spec.
 
 ---
 
 ### gRPC API
 
-Same operations, same validation rules, same error semantics as the REST API. The `.proto` files are the
-authoritative contract - the REST interface must remain consistent with them.
+Same operations, validation rules, error semantics as the REST API. The `.proto` files are the
+authoritative contract, the REST interface must remain consistent with them.
 
 ```protobuf
 syntax = "proto3";
@@ -1008,6 +899,56 @@ message CreateMergeRequest {
 
 ---
 
+## Authentication
+
+Authentication is optional and is controlled by `VERGE_AUTH_ENABLED`. When disabled, the server logs a
+notice and relies on network-layer controls (mTLS, reverse proxy, VPC isolation). When enabled, every
+request to `/v1` and every gRPC call requires a valid API key.
+
+### HTTP
+
+Set the `Authorization` header on every request:
+
+```
+Authorization: Bearer <key>
+```
+
+Rejected requests return `401 Unauthorized` with a JSON body:
+
+```json
+{
+  "error": "unauthorized",
+  "message": "A valid API key is required. Set the Authorization header to: Bearer <key>"
+}
+```
+
+### gRPC
+
+Set the `authorization` metadata key on every call:
+
+```
+authorization: Bearer <key>
+```
+
+Rejected calls receive a `UNAUTHENTICATED` gRPC status with a human-readable message.
+
+### Key management
+
+Keys are configured as a comma-separated list in `VERGE_AUTH_KEYS`. Multiple keys can be active
+simultaneously, allowing zero-downtime key rotation: add the new key, deploy, remove the old key,
+deploy again. Empty or duplicate keys are rejected at startup.
+
+All key comparisons use `crypto/subtle.ConstantTimeCompare` to prevent timing attacks. The loop always
+runs all comparisons regardless of early match, so key count is not observable from response time.
+
+### Failure metric
+
+Every rejected request (missing key, invalid key) increments `verge_auth_failures_total` with label
+`transport=http` or `transport=grpc`. No "reason" label is exposed; distinguishing "missing" from
+"invalid" would act as an oracle for key guessing.
+
+---
+
 ## Outbox Worker
 
 The outbox worker is a **separate process** (`cmd/worker`) that reads `OutboxEvent` rows from PostgreSQL
@@ -1167,6 +1108,83 @@ uses recursive CTEs for graph traversal.
 
 This means all three graph operations work correctly even when Neo4j is disabled or unhealthy, at the
 cost of slower query performance. Neo4j exists to accelerate these queries at scale, not to gate them.
+
+---
+
+## Observability
+
+Verge uses the OpenTelemetry SDK throughout. All telemetry is a strict no-op when `VERGE_OTEL_ENABLED=false`;
+no exporters are started, no background goroutines run, and there is no performance impact. The flag is off
+by default.
+
+### Configuration
+
+| Variable                      | Default  | Options                        | Description                                             |
+| ----------------------------- | -------- | ------------------------------ | ------------------------------------------------------- |
+| `VERGE_OTEL_ENABLED`          | `false`  |                                | Master switch; all telemetry is no-op when off          |
+| `VERGE_OTEL_EXPORTER`         | `stdout` | `stdout`, `otlp`, `prometheus` | Where telemetry is sent                                 |
+| `VERGE_OTEL_OTLP_ENDPOINT`    |          |                                | gRPC endpoint for the OTLP collector or backend         |
+| `VERGE_OTEL_SERVICE_NAME`     | `verge`  |                                | Attached to every span, metric, and log line            |
+| `VERGE_OTEL_SAMPLE_RATE`      | `1.0`    | `0.0`–`1.0`                    | Fraction of root spans sampled (parent-based)           |
+| `VERGE_OTEL_METRICS_INTERVAL` | `15s`    |                                | Push interval for `stdout` and `otlp` exporters         |
+| `VERGE_OTEL_LOG_LEVEL`        | `info`   | `info`, `debug`                | `debug` adds per-storage-call and per-outbox-event logs |
+
+### Exporters
+
+**`stdout`** (default): pretty-prints spans and metrics to the console. Useful in development and CI.
+
+**`otlp`**: pushes spans and metrics via gRPC to `VERGE_OTEL_OTLP_ENDPOINT` using the OTLP protocol.
+Compatible with any OTLP-capable backend: Datadog, Grafana Cloud, Honeycomb, Jaeger, or a self-hosted
+OTel Collector. Use this when you need distributed traces and metrics in the same pipeline.
+
+**`prometheus`**: exposes a `GET /metrics` scrape endpoint in OpenMetrics format on the HTTP server.
+Handles metrics only; traces still go to stdout when this exporter is active. Use `otlp` if you need
+both traces and metrics in the same backend.
+
+### Distributed Tracing
+
+Every HTTP request gets a server span. Every gRPC unary call gets a server span. W3C TraceContext
+propagation is enabled on both transports; incoming `traceparent`/`tracestate` headers and gRPC
+metadata are extracted automatically, so Verge spans appear as children inside upstream traces.
+
+HTTP span names follow `METHOD /v1/route-pattern` (e.g. `GET /v1/repos/{repo_id}/branches/{name}`).
+gRPC span names follow `gRPC /verge.v1.ServiceName/MethodName`. Every storage backend call gets its
+own child span with `db.system`, `db.operation.name`, and `verge.storage.backend` attributes:
+
+```
+GET /v1/repos/{repo_id}/branches/{name}
+  └── verge.storage redis.GetHead
+  └── verge.storage postgres.GetHead   (on cache miss)
+```
+
+### Structured Logging
+
+All logs are emitted as structured JSON via `log/slog`. A request-scoped logger is created at the start
+of each HTTP request and gRPC call and propagated through the `context.Context`, so log lines from
+handlers, service calls, and storage operations automatically carry the `request_id`, HTTP method, path,
+or gRPC service/method from the originating request.
+
+At `VERGE_OTEL_LOG_LEVEL=debug`, every storage call emits an entry with backend, operation, and duration,
+and every outbox event emits an entry with its type and processing outcome.
+
+### Metrics Reference
+
+| Metric                                     | Type          | Labels                           | Description                                       |
+| ------------------------------------------ | ------------- | -------------------------------- | ------------------------------------------------- |
+| `verge_http_requests_total`                | Counter       | `method`, `route`, `status_code` | Total completed HTTP requests                     |
+| `verge_http_request_duration_seconds`      | Histogram     | `method`, `route`                | HTTP request latency                              |
+| `verge_http_requests_in_flight`            | UpDownCounter | none                             | Concurrently active HTTP requests                 |
+| `verge_grpc_requests_total`                | Counter       | `service`, `method`, `code`      | Total completed gRPC RPCs                         |
+| `verge_grpc_request_duration_seconds`      | Histogram     | `service`, `method`              | gRPC RPC latency                                  |
+| `verge_storage_operation_duration_seconds` | Histogram     | `backend`, `operation`           | Storage backend call latency                      |
+| `verge_storage_errors_total`               | Counter       | `backend`, `operation`           | Storage backend errors                            |
+| `verge_storage_cache_hits_total`           | Counter       | `backend`, `cache`               | Cache hits (Redis branch head or commit cache)    |
+| `verge_storage_cache_misses_total`         | Counter       | `backend`, `cache`               | Cache misses that fell through to PostgreSQL      |
+| `verge_outbox_events_processed_total`      | Counter       | none                             | Outbox events processed by the worker             |
+| `verge_outbox_poll_duration_seconds`       | Histogram     | none                             | Duration of one outbox worker poll cycle          |
+| `verge_outbox_lag_events`                  | Gauge         | none                             | Pending (unprocessed) events in the outbox table  |
+| `verge_outbox_batch_size`                  | Histogram     | none                             | Events processed per poll cycle                   |
+| `verge_auth_failures_total`                | Counter       | `transport`                      | Requests rejected due to a missing or invalid key |
 
 ---
 

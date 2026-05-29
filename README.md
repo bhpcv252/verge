@@ -58,6 +58,8 @@ Core endpoints:
 | Get commit        | `GET /v1/repos/:repo_id/commits/:commit_id`                |
 | Traverse history  | `GET /v1/repos/:repo_id/commits?traversal=dag&branch=main` |
 
+An interactive Swagger UI is available at `GET /docs` when the HTTP server is running. The raw OpenAPI 3.0 spec is at `GET /docs/openapi.yaml` (embedded at build time, suitable for SDK generation).
+
 All write operations use optimistic locking. If two callers try to advance the same branch concurrently, one gets a `409` with the current head so it can retry safely without losing anything.
 
 For the full API reference, see [ARCHITECTURE.md](./ARCHITECTURE.md).
@@ -77,6 +79,41 @@ Verge is designed to scale with your product:
 You choose which backends to enable based on your product's scale and infrastructure. The API surface is identical regardless, you can start with PostgreSQL only and add Redis or Neo4j later without changing your integration.
 
 All derived stores (Redis, Neo4j) are projections that can be rebuilt from PostgreSQL at any time.
+
+---
+
+## Authentication
+
+Authentication is optional. When disabled (the default), Verge relies on network-level controls: mTLS,
+a reverse proxy, or VPC isolation. When `VERGE_AUTH_ENABLED=true`, every `/v1` request and every gRPC
+call must include a valid API key.
+
+**HTTP:** set `Authorization: Bearer <key>` on every request.
+
+**gRPC:** set the `authorization` metadata key to `Bearer <key>` on every call.
+
+Keys are configured as a comma-separated list in `VERGE_AUTH_KEYS`. Multiple keys can be active at the
+same time for zero-downtime rotation. Failed attempts increment the `verge_auth_failures_total` metric
+and are logged as warnings.
+
+---
+
+## Observability
+
+Verge is instrumented with OpenTelemetry throughout. All telemetry is a no-op when `VERGE_OTEL_ENABLED=false`
+(the default).
+
+Three exporter backends are built in:
+
+- **`stdout`**: pretty-print spans and metrics to the console. Good for development.
+- **`otlp`**: push spans and metrics to any OTLP-compatible backend (Datadog, Grafana Cloud, Honeycomb, Jaeger) via `VERGE_OTEL_OTLP_ENDPOINT`.
+- **`prometheus`**: expose a `GET /metrics` scrape endpoint in OpenMetrics format.
+
+Every HTTP request and gRPC call gets a server span with W3C TraceContext propagation, so Verge slots into
+an existing distributed trace automatically. Every storage call gets a child span. Structured logs are
+propagated through `context.Context` so every log line carries the request's ID and route.
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md#observability) for the full metrics reference and configuration variables.
 
 ---
 
